@@ -1079,6 +1079,15 @@ static int timer_detach(struct eb_t *ebt, struct ev_timer *evt)
 /******************************************************************/
 /* event queue function                                           */
 /******************************************************************/
+
+/**
+ * 注册事件e到ebt例程
+ * 
+ * \param  e   struct ev*
+ * \param  ebt struct eb_t*
+ * \return     int
+ * 
+ */
 int ev_attach(struct ev *e, struct eb_t *ebt)
 {
 	if (!(e->kide & ebt->kides))
@@ -1095,6 +1104,8 @@ int ev_attach(struct ev *e, struct eb_t *ebt)
 			break;
 
 		case E_FLAG:
+			//暂时不处理用户自定义事件
+			return -1;
 			break;
 
 		default:
@@ -1117,6 +1128,7 @@ int ev_detach(struct ev_io *evio, struct eb_t *ebt)
  * 将事件e加入到dispatchq队列
  * 
  * \param e struct ev*
+ * 
  */
 void eventq_in(struct ev *e)
 {
