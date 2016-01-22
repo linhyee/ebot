@@ -532,27 +532,39 @@ static void* thd_pool_loop(void *arg)
 /******************************************************************/
 /* Reactor                                                        */
 /******************************************************************/
-typedef e_cb_t(short events, void *arg);
+typedef void e_cb_t(short events, void *arg);
 struct eb_t;
 struct eb_o;
 
+enum e_opt
+{
+	E_ONCE = 0x01,	/* 当事件dipsatch到队列后,  从eb_t移除时, 标记为ONCE */
+	E_FREE = 0x02	/* 事件已经从eb_t实例被移除, 将其标记为E_FREE, 释放其存储空间 */
+};
+
+enum
+{
+	E_QUEUE = 0x80 //标记是否已经在dispatchq队列
+};
+
 enum e_kide
 {
-	E_READ   = 0x01,
-	E_WRITE  = 0x02,
-	E_TIMER  = 0x04,
-	E_SIGNAL = 0x08,
-	E_CHILD  = 0x10,
-	E_FLAG   = 0x20
+	E_READ   = 0x01,	/* IO读 */
+	E_WRITE  = 0x02,	/* IO写 */
+	E_TIMER  = 0x04,	/* 定时器 */
+	E_SIGNAL = 0x08,	/* 信号 */
+	E_CHILD  = 0x10,	/* 进程 */
+	E_FLAG   = 0x20		/* 用户自定义 */
 };
 
 struct ev
 {
-	enum e_kide kide;	/* what kide of event */
-	e_cb_t *cb;			/* callback */
-	struct eb_t *ebt;	/* ebt we're attached to*/
-	void *arg;			/* event param */
-
+	enum e_kide kide;			/* 事件类型 */
+	enum e_opt opt;				/* 事件的标记 */
+	e_cb_t *cb;					/* 事件回调函数 */
+	struct eb_t *ebt;			/* 指向eb_t结构体的实例 */
+	void *arg;					/* 事件参数 */
+	TAILQ_ENTRY (ev) dispatchq; /* TAILQ_ENTRY */
 };
 
 /* for io event */
@@ -593,28 +605,29 @@ struct ev_flag
 
 struct eb_t
 {
-	const struct eb_o *ebo;			/* operations */
-	enum e_kide kides; 				/* supported events kides*/
-	unsigned int num;				/* number of events registered */
-	unsigned int numtimers;			/* current total timer events */
-	unsigned int maxtimers;			/* max number of timer events */
-	struct timeval timerdebt;		/* time to be sub'd from timers */
-	int broken;						/* ept_break() called */
+	const struct eb_o *ebo;			/* 操作eb_t实例的对象 */
+	enum e_kide kides; 				/* 所允许的支持事件类型 */
+	unsigned int num;				/* 注册到eb_t实例的事件总数 */
+	unsigned int numtimers;			/* 当前定时器的总数 */
+	unsigned int maxtimers;			/* 最大定时器数 */
+	struct timeval timerdebt;		/* 用于定时器相减 */
+	int broken;						/* 中断调用 */
 
-	RB_HEAD(timer_tree, ev_timer) timers;
+	TAILQ_HEAD(, ev) dispatchq;		/* 事件就绪队列 */
+	RB_HEAD(timer_tree, ev_timer) timers; /* 定时器队列 */
 };
 
 struct eb_o
 {
 	const char 		*name;
 	enum e_kide 	kides;
-	size_t 			ebtsz;
+	size_t 			ebtsz;	/* 从eb_t派生的结构体的大小 */
 
 	int (*init)		(struct eb_t *);
 	int (*loop)		(struct eb_t *, const struct timeval *);
 	int (*attach)	(struct eb_t *, struct ev *);	
 	int (*detach)	(struct eb_t *, struct ev *);
-	int (*clean)	(struct eb_t *);
+	int (*free)	(struct eb_t *);
 };
 
 static compare(struct ev_timer *a, struct ev_timer *b)
@@ -665,7 +678,9 @@ static int epoll_init		(struct eb_t *);
 static int epoll_loop		(struct eb_t *, const struct timeval *);
 static int epoll_attach		(struct eb_t *, struct ev *);
 static int epoll_detach		(struct eb_t *, struct ev *);
-static int epoll_clean		(struct eb_t *);
+static int epoll_free		(struct eb_t *);
+
+void eventq_in(struct ev *);
 
 const struct eb_o ebo_epoll = {
 	.name   = "epoll",
@@ -675,7 +690,7 @@ const struct eb_o ebo_epoll = {
 	.loop   = epoll_loop,
 	.attach = epoll_attach,
 	.detach = epoll_detach,
-	.clean  = epoll_clean
+	.free   = epoll_free
 };
 
 static int epoll_init(struct eb_t *ebt)
@@ -693,7 +708,7 @@ static int epoll_init(struct eb_t *ebt)
 
 	FD_CLOSEONEXEC(epfd);
 
-	epevents = malloc(EP_SIZE * sizeof (struct epoll_event));
+	epevents = calloc(EP_SIZE , sizeof (struct epoll_event));
 	if (epevents == NULL)
 	{
 		err_msg("malloc failed!");
@@ -732,14 +747,25 @@ static int epoll_loop(struct eb_t *ebt, const struct timeval *tv)
 
 	cnt = epoll_wait(epo->epfd, epo->epevents, epo->epsz, timeout);
 
+	if (cnt < 0)
+		return errno == EINTR ? 0: -1;
+
+	epo->nfds = cnt;
+
 	int i;
 	for (i = 0; i < cnt; ++i)
 	{
 		struct epoll_event *ev = epo->epevents + i;
 
+		int fd = (uint32_t) ev->data.u64;
 		int got = (ev->events & (EPOLLOUT | EPOLLERR | EPOLLHUP) ? E_WRITE : 0)
-				| (ev->events & (EPOLLIN | EPOLLERR | EPOLLHUP) ? E_WRITE : 0);
+				| (ev->events & (EPOLLIN | EPOLLERR | EPOLLHUP) ? E_READ : 0);
 
+		if (got & E_READ)
+			eventq_in((struct ev *) epo->readev[fd]);
+
+		if (got & E_WRITE)
+			eventq_in((struct ev *) epo->writev[fd]);
 	}
 
 	return 0;
@@ -810,7 +836,7 @@ static int epoll_attach(struct eb_t *ebt, struct ev *e)
 	else
 		assert(!"can't happen");
 
-	ev.data.ptr = e;
+	ev.data.u64 = evf->fd;
 	ev.events   = events;
 
 	/* check for duplicate attachments*/
@@ -867,7 +893,7 @@ static int epoll_detach(struct eb_t *ebt, struct ev *e)
 	return 0;
 }
 
-static int epoll_clean(struct eb_t *ebt)
+static int epoll_free(struct eb_t *ebt)
 {
 	struct ebt_epoll *epo = (struct ebt_epoll *) ebt;
 
@@ -882,7 +908,7 @@ static int epoll_clean(struct eb_t *ebt)
 /******************************************************************/
 /* event functions                                                */
 /******************************************************************/
-void ev_set(struct ev *e, enum e_kide kide, e_cb_t *cb, void *arg)
+void ev_init(struct ev *e, enum e_kide kide, e_cb_t *cb, void *arg)
 {
 	e->kide = kide;
 	e->cb   = cb;
@@ -892,15 +918,15 @@ void ev_set(struct ev *e, enum e_kide kide, e_cb_t *cb, void *arg)
 struct ev * ev_read(int fd, e_cb_t *cb, void *arg)
 {
 	struct ev_io *event;	
-	event = malloc(sizeof (*event));
+	event = calloc(1, sizeof (*event));
 
 	if (event == NULL)
 	{
-		err_msg("malloc failed!");
+		err_msg("calloc failed!");
 		return NULL;
 	}
 
-	ev_set((struct ev *) event, E_READ, cb, arg);
+	ev_init((struct ev *) event, E_READ, cb, arg);
 	event->fd = fd;
 
 	return (struct ev *) event;
@@ -909,15 +935,15 @@ struct ev * ev_read(int fd, e_cb_t *cb, void *arg)
 struct ev * ev_write(int fd, e_cb_t *cb, void *arg)
 {
 	struct ev_io *event;
-	event = malloc(sizeof (*event));
+	event = calloc(1, sizeof (*event));
 
 	if (event == NULL)
 	{
-		err_msg("malloc failed!");
+		err_msg("calloc failed!");
 		return NULL;
 	}
 
-	ev_set((struct ev *) event, E_WRITE, cb, arg);
+	ev_init((struct ev *) event, E_WRITE, cb, arg);
 	event->fd = fd;
 
 	return (struct ev *) event;
@@ -926,15 +952,15 @@ struct ev * ev_write(int fd, e_cb_t *cb, void *arg)
 struct ev * ev_signal(int sig, e_cb_t *cb, void *arg)
 {
 	struct ev_signal *event;
-	event = malloc(sizeof (*event));
+	event = calloc(1, sizeof (*event));
 
 	if (event == NULL)
 	{
-		err_msg("malloc failed!");
+		err_msg("calloc failed!");
 		return NULL;
 	}
 
-	ev_set((struct ev *) event, E_SIGNAL, cb, arg);
+	ev_init((struct ev *) event, E_SIGNAL, cb, arg);
 	event->signal = sig;
 
 	return (struct ev *) event;
@@ -943,15 +969,15 @@ struct ev * ev_signal(int sig, e_cb_t *cb, void *arg)
 struct ev * ev_child(pid_t pid, e_cb_t *cb, void *arg)
 {
 	struct ev_child *event;
-	event = malloc(sizeof (*event));
+	event = calloc(1, sizeof (*event));
 
 	if (event == NULL)
 	{
-		err_msg("malloc failed!");
+		err_msg("calloc failed!");
 		return NULL;
 	}
 
-	ev_set((struct ev *) event,E_CHILD, cb, arg);
+	ev_init((struct ev *) event,E_CHILD, cb, arg);
 	event->child = pid;
 
 	return (struct ev *) event;
@@ -960,11 +986,11 @@ struct ev * ev_child(pid_t pid, e_cb_t *cb, void *arg)
 struct ev * ev_flag(int flag, e_cb_t *cb, void *arg)
 {
 	struct ev_flag *event;
-	event = malloc(sizeof (*event));
+	event = calloc(1, sizeof (*event));
 
 	if (event == NULL)
 	{
-		err_msg("malloc failed!");
+		err_msg("calloc failed!");
 		return NULL;
 	}
 }
@@ -1053,7 +1079,7 @@ static int timer_detach(struct eb_t *ebt, struct ev_timer *evt)
 /******************************************************************/
 /* event queue function                                           */
 /******************************************************************/
-int eventq_attach(struct ev *e, struct eb_t *ebt)
+int ev_attach(struct ev *e, struct eb_t *ebt)
 {
 	if (!(e->kide & ebt->kides))
 	{
@@ -1082,9 +1108,23 @@ int eventq_attach(struct ev *e, struct eb_t *ebt)
 	return 0;
 }
 
-int eventq_detach(struct ev_io *evio, struct eb_t *ebt)
+int ev_detach(struct ev_io *evio, struct eb_t *ebt)
 {
 
+}
+
+/**
+ * 将事件e加入到dispatchq队列
+ * 
+ * \param e struct ev*
+ */
+void eventq_in(struct ev *e)
+{
+	if (e->opt & E_QUEUE)
+		return;
+
+	TAILQ_INSERT_TAIL(&e->ebt->dispatchq, e, dispatchq);
+	e->opt |= E_QUEUE;
 }
 
 /******************************************************************/
@@ -1113,6 +1153,9 @@ struct eb_t * ebt_new(enum e_kide kides)
 		ebt->kides = kides;
 		ebt->ebo   = *ebo;
 
+		//初始化事件队列
+		TAILQ_INIT(&ebt->dispatchq);
+
 		/* atempt to initialize it*/
 		if (ebt->ebo->init(ebt) < 0)
 		{
@@ -1134,7 +1177,7 @@ void ebt_break(struct eb_t *ebt)
 
 void ebt_free(struct eb_t *ebt)
 {
-	ebt->ebo->clean(ebt);
+	ebt->ebo->free(ebt);
 	free(ebt);
 }
 
@@ -1142,6 +1185,11 @@ void ebt_free(struct eb_t *ebt)
 /******************************************************************/
 /* test                                                           */
 /******************************************************************/
+void cb (short num, void *arg)
+{
+	err_msg("cb is runnig: [fd=%d] [ev_io=%p]", num, arg);
+}
+
 int main(int argc, char *argv[])
 {
 	struct eb_t ebt;
@@ -1207,6 +1255,40 @@ int main(int argc, char *argv[])
 
 
 	struct eb_t *eb = ebt_new(E_READ|E_WRITE);
+
+	for (i = 0; i < 10; i++)
+	{
+		struct ev *io = ev_read(i, cb, io);
+		io->ebt = eb;	
+		eventq_in(io);
+		err_msg("add to q: [fd=%d] [evi=%p]", i, io);
+	}
+
+	printf("\n");
+
+	//print io
+	struct ev *e = NULL;
+	TAILQ_FOREACH(e, &eb->dispatchq, dispatchq)
+	{
+		struct ev_io *evi = (struct ev_io *) e;
+
+		e->cb(evi->fd, evi);	
+	}
+
+	printf("\n");
+
+	//release io
+	while (e = TAILQ_FIRST(&eb->dispatchq))
+	{
+		TAILQ_REMOVE(&eb->dispatchq, e, dispatchq);
+
+		struct ev_io *evi = (struct ev_io *) e;
+		err_msg("remove fd event: [fd=%d]", evi->fd);
+
+		if (evi)
+			free(evi);
+	}
+
 	ebt_free(eb);
 
 	return 0;	
