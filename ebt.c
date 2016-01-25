@@ -538,8 +538,8 @@ struct eb_o;
 
 enum e_opt
 {
-	E_ONCE = 0x01,	/* 当事件dipsatch到队列后,  从eb_t移除时, 标记为ONCE */
-	E_FREE = 0x02	/* 事件已经从eb_t实例被移除, 将其标记为E_FREE, 释放其存储空间 */
+	E_ONCE = 0x01,	/* 一次性事件, 当事件dipsatch到队列后,  激活后立该从eb_t移除时, 并标记为ONCE */
+	E_FREE = 0x02	/* 事件已经从eb_t实例被移除, 将其标记为E_FREE, 以便释放其存储空间 */
 };
 
 enum
@@ -564,6 +564,7 @@ struct ev
 	e_cb_t *cb;					/* 事件回调函数 */
 	struct eb_t *ebt;			/* 指向eb_t结构体的实例 */
 	void *arg;					/* 事件参数 */
+
 	TAILQ_ENTRY (ev) dispatchq; /* TAILQ_ENTRY */
 };
 
@@ -600,7 +601,8 @@ struct ev_child
 struct ev_flag
 {
 	struct ev event;
-	int flag;	
+	int flag;
+	TAILQ_ENTRY (ev_flag) flags;
 };
 
 struct eb_t
@@ -614,6 +616,7 @@ struct eb_t
 	int broken;						/* 中断调用 */
 
 	TAILQ_HEAD(, ev) dispatchq;		/* 事件就绪队列 */
+	TAILQ_HEAD(, ev_flag) flags;	/* 自定义事件队列 */
 	RB_HEAD(timer_tree, ev_timer) timers; /* 定时器队列 */
 };
 
@@ -623,6 +626,8 @@ struct eb_o
 	enum e_kide 	kides;
 	size_t 			ebtsz;	/* 从eb_t派生的结构体的大小 */
 
+	int (*construct)(struct eb_t *);
+	int (*destruct) (struct eb_t *);
 	int (*init)		(struct eb_t *);
 	int (*loop)		(struct eb_t *, const struct timeval *);
 	int (*attach)	(struct eb_t *, struct ev *);	
@@ -949,6 +954,23 @@ struct ev * ev_write(int fd, e_cb_t *cb, void *arg)
 	return (struct ev *) event;
 }
 
+struct ev * ev_timer(const struct timeval *tv, e_cb_t *cb, void *arg)
+{
+	struct ev_timer *event;
+	event = calloc(1, sizeof (*event));
+
+	if (event == NULL)
+	{
+		err_msg("calloc failed!");
+		return NULL;
+	}
+
+	ev_init((struct ev *) event, E_TIMER, cb, arg);
+	event->tv = *tv;
+
+	return (struct ev *) event;
+}
+
 struct ev * ev_signal(int sig, e_cb_t *cb, void *arg)
 {
 	struct ev_signal *event;
@@ -1096,6 +1118,12 @@ int ev_attach(struct ev *e, struct eb_t *ebt)
 		return -1;
 	}
 
+	if (e->ebt == NULL)
+	{
+		errno = EBUSY;
+		return -1;
+	}
+
 	switch (e->kide)
 	{
 		case E_TIMER:
@@ -1104,7 +1132,7 @@ int ev_attach(struct ev *e, struct eb_t *ebt)
 			break;
 
 		case E_FLAG:
-			//暂时不处理用户自定义事件
+			TAILQ_INSERT_TAIL(&e->ebt->flags, (struct ev_flag *) e, flags);
 			return -1;
 			break;
 
@@ -1119,9 +1147,44 @@ int ev_attach(struct ev *e, struct eb_t *ebt)
 	return 0;
 }
 
-int ev_detach(struct ev_io *evio, struct eb_t *ebt)
+int ev_detach(struct ev *e, struct eb_t *ebt)
 {
+	if (e->ebt == NULL)
+	{
+		errno = EINVAL;
+		return -1;
+	}
 
+	switch (e->kide)
+	{
+		case E_TIMER:
+			if (timer_detach(e->ebt, (struct ev_timer *) e) < 0)
+				return -1;
+			break;
+
+		case E_FLAG:
+			TAILQ_REMOVE(&e->ebt->flags, (struct ev_flag *) e, flags);
+			break;
+
+		default:
+			if (e->ebt->ebo->detach(e->ebt, e) < 0)
+				return -1;
+			break;
+	}
+
+	if (e->opt & E_QUEUE)
+	{
+		TAILQ_REMOVE(&e->ebt->dispatchq, e, dispatchq);
+		e->opt &= ~E_QUEUE;
+	}
+
+	e->ebt->num--;
+	e->ebt = NULL;
+
+	if (e->opt & E_FREE)
+		ev_free(e);
+
+	return 0;
 }
 
 /**
@@ -1182,6 +1245,32 @@ struct eb_t * ebt_new(enum e_kide kides)
 	return NULL;
 }
 
+int ebt_loop(struct eb_t *ebt)
+{
+	struct timeval tv[2];
+	int i, r;
+
+	ebt->broken = 0;
+
+	/* 如果loop存在construct, 先运行 */
+	if (ebt->ebo->construct != NULL && ebt->ebo->construct(ebt) < 0)
+		return -1;
+
+	i = 0;
+	gettimeofday(tv + i, NULL);
+
+	while (ebt->num > 0 && !ebt->broken)
+	{
+
+	}
+
+	/* ebt循环结束后, 析构 */
+	if (ebt->ebo->destruct != NULL && ebt->ebo->destruct(ebt) < 0)
+		return -1;
+
+	return r;
+}
+
 void ebt_break(struct eb_t *ebt)
 {
 	ebt->broken = 1;	
@@ -1200,6 +1289,26 @@ void ebt_free(struct eb_t *ebt)
 void cb (short num, void *arg)
 {
 	err_msg("cb is runnig: [fd=%d] [ev_io=%p]", num, arg);
+}
+
+void tcb(short num, void *arg)
+{
+	struct ev_timer *evt = (struct ev_timer *)arg;
+
+	err_msg("tcb was invoke: [tv.tv_sec=%d] [tv.tv_usec=%d] [ev_timer=%p]", evt->remain.tv_sec, evt->remain.tv_usec, arg);
+	err_msg("tcb arg: [arg=%s]", (char *)(evt->event.arg));
+}
+
+void printEbt(struct eb_t *ebt)
+{
+	printf("\n\n\n");
+
+	struct ebt_epoll *epo = (struct ebt_epoll *) ebt;	
+	err_msg("ebt -> epo info: [epo=%p]", epo);
+
+	err_msg("dispatchq:");
+
+	printf("\n\n\n");
 }
 
 int main(int argc, char *argv[])
@@ -1302,6 +1411,22 @@ int main(int argc, char *argv[])
 	}
 
 	ebt_free(eb);
+
+
+
+
+	printf ("\n\n");
+
+	struct timeval tv = {5, 0};
+	struct ev *et;
+	char *buf ="###__---%%%%||||bbbbbbbbbb";
+
+	struct eb_t *nebt = ebt_new(E_READ | E_WRITE);
+
+	et = ev_timer(&tv, tcb, buf);
+	ev_attach(et, nebt);
+
+	ebt_free(nebt);
 
 	return 0;	
 }
