@@ -605,6 +605,9 @@ struct ev_flag
 	TAILQ_ENTRY (ev_flag) flags;
 };
 
+/**
+ * 反应堆基类
+ */
 struct eb_t
 {
 	const struct eb_o *ebo;			/* 操作eb_t实例的对象 */
@@ -620,6 +623,9 @@ struct eb_t
 	RB_HEAD(timer_tree, ev_timer) timers; /* 定时器队列 */
 };
 
+/**
+ * ebt oprerations 反应堆的实例操作元
+ */
 struct eb_o
 {
 	const char 		*name;
@@ -698,6 +704,13 @@ const struct eb_o ebo_epoll = {
 	.free   = epoll_free
 };
 
+/**
+ * epoll初始化
+ * 
+ * \param  ebt struct eb_t*
+ * \return     int
+ * 
+ */
 static int epoll_init(struct eb_t *ebt)
 {
 	int epfd;
@@ -742,6 +755,14 @@ static int epoll_init(struct eb_t *ebt)
 	return 0;
 }
 
+/**
+ * ebt事件循环
+ * 
+ * \param  ebt struct eb_t *
+ * \param  tv  struct timeval *
+ * \return     int
+ * 
+ */
 static int epoll_loop(struct eb_t *ebt, const struct timeval *tv)
 {
 	struct ebt_epoll *epo = (struct ebt_epoll *) ebt;
@@ -841,23 +862,33 @@ static int epoll_attach(struct eb_t *ebt, struct ev *e)
 	else
 		assert(!"can't happen");
 
+	/* check for duplicate attachments*/
+	if (evq[evf->fd] != NULL)
+	{
+		errno = EBUSY;
+		return -1;
+	}
+
 	ev.data.u64 = evf->fd;
 	ev.events   = events;
 
-	/* check for duplicate attachments*/
+	/* add it to epoll fd */
 	op = evq[evf->fd] != NULL ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
 
 	if (epoll_ctl(epo->epfd, op, evf->fd, &ev) < 0)
 	{
-		err_msg("ev: [ev=%p] [fd=%d] [op=%s] [events=%d]",
-			ev,
-			evf->fd,
-			op == EPOLL_CTL_ADD  ? "EPOLL_CTL_ADD": "EPOLL_CTL_MOD",
-			ev.events & EPOLLIN  ? "EPOLLIN"  : "",
-			ev.events & EPOLLOUT ? "EPOLLOUT" : ""
-		);
+		err_msg("epoll_ctl error: [errno=%d] [errstr=%s]", errno, strerror(errno));
 		return -1;
 	}
+
+	//debug info
+	err_msg ("ev: [ev=%p] [fd=%d] [op=%s] [events=%s] [kide=%s] [cb=%p]", 
+		e, 
+		evf->fd, 
+		op == EPOLL_CTL_ADD  ? "EPOLL_CTL_ADD": "EPOLL_CTL_MOD", 
+		ev.events & EPOLLIN  ? "EPOLLIN"  : (ev.events & EPOLLOUT ? "EPOLLOUT" : ""), 
+		e->kide & E_READ ? "E_READ": (e->kide & E_WRITE ? "E_WRITE": ""), 
+		e->cb);
 
 	evq[evf->fd] = evf;
 
@@ -1015,6 +1046,10 @@ struct ev * ev_flag(int flag, e_cb_t *cb, void *arg)
 		err_msg("calloc failed!");
 		return NULL;
 	}
+	ev_init((struct ev *) event, E_FLAG, cb, arg);
+	event->flag = flag;
+
+	return (struct ev *) event;
 }
 
 void ev_free(struct ev *e)
@@ -1118,7 +1153,7 @@ int ev_attach(struct ev *e, struct eb_t *ebt)
 		return -1;
 	}
 
-	if (e->ebt == NULL)
+	if (e->ebt != NULL)
 	{
 		errno = EBUSY;
 		return -1;
@@ -1132,7 +1167,7 @@ int ev_attach(struct ev *e, struct eb_t *ebt)
 			break;
 
 		case E_FLAG:
-			TAILQ_INSERT_TAIL(&e->ebt->flags, (struct ev_flag *) e, flags);
+			TAILQ_INSERT_TAIL(&ebt->flags, (struct ev_flag *) e, flags);
 			return -1;
 			break;
 
@@ -1141,8 +1176,8 @@ int ev_attach(struct ev *e, struct eb_t *ebt)
 				return -1;
 			break;
 	}
-	e->ebt= ebt;
 	ebt->num++;
+	e->ebt= ebt;
 
 	return 0;
 }
@@ -1158,27 +1193,27 @@ int ev_detach(struct ev *e, struct eb_t *ebt)
 	switch (e->kide)
 	{
 		case E_TIMER:
-			if (timer_detach(e->ebt, (struct ev_timer *) e) < 0)
+			if (timer_detach(ebt, (struct ev_timer *) e) < 0)
 				return -1;
 			break;
 
 		case E_FLAG:
-			TAILQ_REMOVE(&e->ebt->flags, (struct ev_flag *) e, flags);
+			TAILQ_REMOVE(&ebt->flags, (struct ev_flag *) e, flags);
 			break;
 
 		default:
-			if (e->ebt->ebo->detach(e->ebt, e) < 0)
+			if (ebt->ebo->detach(ebt, e) < 0)
 				return -1;
 			break;
 	}
 
 	if (e->opt & E_QUEUE)
 	{
-		TAILQ_REMOVE(&e->ebt->dispatchq, e, dispatchq);
+		TAILQ_REMOVE(&ebt->dispatchq, e, dispatchq);
 		e->opt &= ~E_QUEUE;
 	}
 
-	e->ebt->num--;
+	ebt->num--;
 	e->ebt = NULL;
 
 	if (e->opt & E_FREE)
@@ -1214,7 +1249,7 @@ struct eb_t * ebt_new(enum e_kide kides)
 	struct eb_t *ebt;
 	const struct eb_o **ebo;
 
-	/* look for an appropriate option */
+	/* 寻找对应支持事伯的操作实例 */
 	for (ebo = ebo_map; *ebo; ebo++)
 	{
 		if ((((*ebo)->kides | E_TIMER | E_FLAG) & kides ) != kides)
@@ -1229,9 +1264,11 @@ struct eb_t * ebt_new(enum e_kide kides)
 		ebt->ebo   = *ebo;
 
 		//初始化事件队列
+		TAILQ_INIT(&ebt->flags);
 		TAILQ_INIT(&ebt->dispatchq);
+		RB_INIT(&ebt->timers);
 
-		/* atempt to initialize it*/
+		/* 初始化ebt派生结构 */
 		if (ebt->ebo->init(ebt) < 0)
 		{
 			free(ebt);
@@ -1299,14 +1336,74 @@ void tcb(short num, void *arg)
 	err_msg("tcb arg: [arg=%s]", (char *)(evt->event.arg));
 }
 
+void fcb(short num, void *arg)
+{
+	err_msg("fcb was invoke: [num=%d] [arg=%p]", num, arg);
+}
+
 void printEbt(struct eb_t *ebt)
 {
 	printf("\n\n\n");
 
 	struct ebt_epoll *epo = (struct ebt_epoll *) ebt;	
-	err_msg("ebt -> epo info: [epo=%p]", epo);
+	err_msg("ebt -> epo info: [epo=%p] [ebo=%p] [kides=%x] [timer_tree=%p] [dispatchq=%p] [flags=%p]", epo, ebt->ebo, ebt->kides, &ebt->timers, &ebt->dispatchq, &ebt->flags);
 
-	err_msg("dispatchq:");
+	//print dispatchq
+	if(TAILQ_EMPTY(&ebt->dispatchq))
+		err_msg("dispatchq: it's empty!");
+	else
+	{
+		struct ev *e;
+		TAILQ_FOREACH(e, &ebt->dispatchq, dispatchq)
+		{
+			err_msg("dispatchq item: [adr=%p] [kide=%x] [opt=%x]", e, e->kide, e->opt);
+		}
+	}
+
+	//print readev
+	int i;
+	struct ev_io *evi;
+	for (i = 0; i < epo->epsz; i++)
+	{
+		if (epo->readev[i] != NULL)
+		{
+			evi = (struct ev_io *) epo->readev[i];
+			err_msg("readev item: [adr=%p] [fd=%d] [pos=%d]", evi, evi->fd, i);
+		}
+	}
+	//print writev
+	for (i = 0; i < epo->epsz; i++)
+	{
+		if (epo->writev[i] != NULL)
+		{
+			evi = (struct ev_io *) epo->writev[i];
+			err_msg("writev item: [ard=%p] [fd=%d] [pos=%d]", evi, evi->fd, i);
+		}
+	}
+
+	//print timer tree info
+	if (RB_EMPTY(&ebt->timers))
+		err_msg("timer tree: it's empty!");
+	else
+	{
+		struct ev_timer *evt;
+		RB_FOREACH(evt, timer_tree, &ebt->timers)
+		{
+			err_msg("timer tree item: [adr=%p] [remain.tv_sec=%d] [remain.tv_usec=%d]", evt, evt->remain.tv_sec, evt->remain.tv_usec);	
+		}
+	}
+
+	//print flags queue info
+	if (TAILQ_EMPTY(&ebt->flags))
+		err_msg("flagsq: it's empty!");
+	else
+	{
+		struct ev_flag *e;
+		TAILQ_FOREACH(e, &ebt->flags, flags)
+		{
+			err_msg("flagsq item: [adr=%p] [flag=%d]", e, e->flag);
+		}
+	}
 
 	printf("\n\n\n");
 }
@@ -1418,13 +1515,38 @@ int main(int argc, char *argv[])
 	printf ("\n\n");
 
 	struct timeval tv = {5, 0};
-	struct ev *et;
 	char *buf ="###__---%%%%||||bbbbbbbbbb";
+	int j, ret;
 
-	struct eb_t *nebt = ebt_new(E_READ | E_WRITE);
+	struct eb_t *nebt = ebt_new(E_READ | E_WRITE | E_TIMER | E_FLAG);
+	printEbt(nebt);
 
-	et = ev_timer(&tv, tcb, buf);
-	ev_attach(et, nebt);
+	//test timer
+	struct ev *et;
+	for (j = 0; j < 10; j++)
+	{
+		et  = ev_timer(&tv, tcb, buf);
+		ret = ev_attach(et, nebt);
+	}
+
+	//test io fd
+	struct ev *ef;
+	for (j = 0; j < 10; j++)
+	{
+		ef  = ev_read(0, fcb, buf);
+		ret = ev_attach(ef, nebt);
+	}
+
+	//test flag
+	struct ev *evf;
+	for (j = 0; j < 10; j++)
+	{
+		evf = ev_flag(j, fcb, buf);
+		ret = ev_attach(evf, nebt);
+	}
+
+	printEbt(nebt);	
+	err_msg("ret =%d errno=%d errstr=%s", ret, errno, strerror(errno));
 
 	ebt_free(nebt);
 
