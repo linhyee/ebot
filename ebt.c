@@ -46,9 +46,14 @@ static void err_msg_(const char *fmt, ...)
 	return;
 }
 
-/*
- * print message and return to caller
- */
+/**
+  * print message and return to caller
+  * 
+  * \param errnoflag int
+  * \param fmt       const char*
+  * \param ap        va_list
+  * 
+  */
 static void err_doit(int errnoflag, const char *fmt, va_list ap)
 {
 	int errno_save, n;
@@ -1168,7 +1173,6 @@ int ev_attach(struct ev *e, struct eb_t *ebt)
 
 		case E_FLAG:
 			TAILQ_INSERT_TAIL(&ebt->flags, (struct ev_flag *) e, flags);
-			return -1;
 			break;
 
 		default:
@@ -1405,6 +1409,10 @@ void printEbt(struct eb_t *ebt)
 		}
 	}
 
+	err_msg("ebt total ev nums: [num=%d]", ebt->num);
+	err_msg("ebt total timer nums: [numtimers=%d]", ebt->numtimers);
+	err_msg("ebt total dispatchq nums: []");
+
 	printf("\n\n\n");
 }
 
@@ -1515,8 +1523,9 @@ int main(int argc, char *argv[])
 	printf ("\n\n");
 
 	struct timeval tv = {5, 0};
+	struct ev *t1, *t2, *t3;
 	char *buf ="###__---%%%%||||bbbbbbbbbb";
-	int j, ret;
+	int j, k, ret;
 
 	struct eb_t *nebt = ebt_new(E_READ | E_WRITE | E_TIMER | E_FLAG);
 	printEbt(nebt);
@@ -1527,6 +1536,10 @@ int main(int argc, char *argv[])
 	{
 		et  = ev_timer(&tv, tcb, buf);
 		ret = ev_attach(et, nebt);
+
+		//保存第5个
+		if (j == 4)
+			t1 = et;
 	}
 
 	//test io fd
@@ -1535,6 +1548,9 @@ int main(int argc, char *argv[])
 	{
 		ef  = ev_read(0, fcb, buf);
 		ret = ev_attach(ef, nebt);
+
+		if (j == 0)
+			t3 = ef;
 	}
 
 	//test flag
@@ -1543,9 +1559,19 @@ int main(int argc, char *argv[])
 	{
 		evf = ev_flag(j, fcb, buf);
 		ret = ev_attach(evf, nebt);
+
+		if (j == 2)
+			t2 = evf;
 	}
 
 	printEbt(nebt);	
+
+	ev_detach(t1, nebt);
+	ev_detach(t2, nebt);
+	ev_detach(t3, nebt);
+
+	printEbt(nebt);
+
 	err_msg("ret =%d errno=%d errstr=%s", ret, errno, strerror(errno));
 
 	ebt_free(nebt);
