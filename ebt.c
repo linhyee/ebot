@@ -842,45 +842,45 @@ static int _resize(struct ebt_epoll *epo, int max)
 static int epoll_attach(struct eb_t *ebt, struct ev *e)
 {
 	struct epoll_event 	ev;
-	struct ebt_epoll 	*epo = (struct ebt_epoll *) ebt;
-	struct ev_io 		*evf = (struct ev_io *) e;
-	struct ev_io		**evq;
-
-	/* make room for this event ?*/
-	if ((unsigned int) evf->fd >= epo->epsz && _resize(epo, evf->fd))
-		return -1;
-
-	int op     = 0;
-	int events = 0;
-
-	/* determine where to add it */
-	if (evf->event.kide & E_READ)
-	{
-		evq = epo->readev;
-		events |= EPOLLIN;
-	}
-	else if (evf->event.kide & E_WRITE)
-	{
-		evq = epo->writev;
-		events |= EPOLLOUT;
-	}
-	else
-		assert(!"can't happen");
+	struct ebt_epoll 	*epo     = (struct ebt_epoll *) ebt;
+	struct ev_io 		*evf     = (struct ev_io *) e;
 
 	/* check for duplicate attachments*/
-	if (evq[evf->fd] != NULL)
+	if (epo->readev[evf->fd] != NULL && (epo->readev[evf->fd]->event.kide & e->kide))
+	{
+		errno = EBUSY;
+		return -1;
+	}
+	if (epo->writev[evf->fd] != NULL && (epo->writev[evf->fd]->event.kide & e->kide))
 	{
 		errno = EBUSY;
 		return -1;
 	}
 
+	/* make room for this event ?*/
+	if ((unsigned int) evf->fd >= epo->epsz && _resize(epo, evf->fd))
+		return -1;
+
+	int op     = EPOLL_CTL_ADD;
+	int events = 0;
+
+	events = (evf->event.kide & E_READ ? EPOLLIN: 0) | (evf->event.kide & E_WRITE ? EPOLLOUT : 0);
+
+	if (epo->readev[evf->fd] != NULL)
+	{
+		events |= EPOLLIN;
+		op = EPOLL_CTL_MOD;
+	}
+	if (epo->writev[evf->fd] != NULL)
+	{
+		events |= EPOLLOUT;
+		op = EPOLL_CTL_MOD;
+	}
+
 	ev.data.u64 = evf->fd;
 	ev.events   = events;
 
-	/* add it to epoll fd */
-	op = evq[evf->fd] != NULL ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
-
-	if (epoll_ctl(epo->epfd, op, evf->fd, &ev) < 0)
+	if (epoll_ctl(epo->epfd, op, evf->fd, &ev) == -1)
 	{
 		err_msg("epoll_ctl error: [errno=%d] [errstr=%s]", errno, strerror(errno));
 		return -1;
@@ -891,11 +891,15 @@ static int epoll_attach(struct eb_t *ebt, struct ev *e)
 		e, 
 		evf->fd, 
 		op == EPOLL_CTL_ADD  ? "EPOLL_CTL_ADD": "EPOLL_CTL_MOD", 
-		ev.events & EPOLLIN  ? "EPOLLIN"  : (ev.events & EPOLLOUT ? "EPOLLOUT" : ""), 
+		ev.events ^ (EPOLLIN | EPOLLOUT) ? (ev.events & EPOLLOUT ? "EPOLLOUT" : (ev.events & EPOLLIN) ? "EPOLLIN": "") : "EPOLLIN|EPOLLOUT",
 		e->kide & E_READ ? "E_READ": (e->kide & E_WRITE ? "E_WRITE": ""), 
 		e->cb);
 
-	evq[evf->fd] = evf;
+	if (evf->event.kide & E_READ)
+		epo->readev[evf->fd] = evf;
+
+	if (evf->event.kide & E_WRITE)
+		epo->writev[evf->fd] = evf;
 
 	return 0;
 }
@@ -1544,14 +1548,25 @@ int main(int argc, char *argv[])
 
 	//test io fd
 	struct ev *ef;
-	for (j = 0; j < 10; j++)
-	{
-		ef  = ev_read(0, fcb, buf);
-		ret = ev_attach(ef, nebt);
 
-		if (j == 0)
-			t3 = ef;
-	}
+	ef = ev_write(0, fcb, buf);
+	ef->kide |= E_READ;
+	ret = ev_attach(ef, nebt);
+
+	// for (j = 0; j < 10; j++)
+	// {
+	// 	ef  = ev_write(j, fcb, buf);
+	// 	ret = ev_attach(ef, nebt);
+	// }
+
+	// for (j = 0; j < 10; j++)
+	// {
+	// 	ef  = ev_read(j, fcb, buf);
+	// 	ret = ev_attach(ef, nebt);
+
+	// 	if (j == 0)
+	// 		t3 = ef;
+	// }
 
 	//test flag
 	struct ev *evf;
@@ -1568,7 +1583,7 @@ int main(int argc, char *argv[])
 
 	ev_detach(t1, nebt);
 	ev_detach(t2, nebt);
-	ev_detach(t3, nebt);
+	// ev_detach(t3, nebt);
 
 	printEbt(nebt);
 
