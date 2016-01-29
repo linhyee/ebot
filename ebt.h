@@ -19,7 +19,7 @@ enum e_kind
 
 enum e_opt
 {
-	E_ONCE = 0x01,	/* 当事件dipsatch到队列后,  从eb_t移除时, 标记为ONCE */
+	E_ONCE = 0x01,	/* 一次性事件, 当事件dipsatch到队列后,  激活后立该从eb_t移除, 并标记为ONCE */
 	E_FREE = 0x02	/* 事件已经从eb_t实例被移除, 将其标记为E_FREE, 释放其存储空间 */
 };
 

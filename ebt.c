@@ -80,7 +80,6 @@ static void err_doit(int errnoflag, const char *fmt, va_list ap)
 #define __QUOTE(x) # x
 #define  _QUOTE(x) __QUOTE(x)
 
-#ifdef DEBUG
 #define err_msg(fmt, ...) do {                                       \
 	time_t t = time(NULL);                                           \
 	struct tm *dm = localtime(&t);                                   \
@@ -93,8 +92,10 @@ static void err_doit(int errnoflag, const char *fmt, va_list ap)
 		__func__,                                                    \
 		## __VA_ARGS__);                                             \
 } while(0) 
+#ifdef DEBUG
+#define err_debug(fmt, ...) err_msg(fmt, ## __VA_ARGS__)
 #else
-#define err_msg(fmt, ...)
+#define err_debug(fmt, ...)
 #endif
 
 /******************************************************************/
@@ -543,7 +544,7 @@ struct eb_o;
 
 enum e_opt
 {
-	E_ONCE = 0x01,	/* 一次性事件, 当事件dipsatch到队列后,  激活后立该从eb_t移除时, 并标记为ONCE */
+	E_ONCE = 0x01,	/* 一次性事件, 当事件dipsatch到队列后,  激活后立该从eb_t移除, 并标记为ONCE */
 	E_FREE = 0x02	/* 事件已经从eb_t实例被移除, 将其标记为E_FREE, 以便释放其存储空间 */
 };
 
@@ -887,12 +888,12 @@ static int epoll_attach(struct eb_t *ebt, struct ev *e)
 	}
 
 	//debug info
-	err_msg ("ev: [ev=%p] [fd=%d] [op=%s] [events=%s] [kide=%s] [cb=%p]", 
+	err_debug ("ev: [ev=%p] [fd=%d] [op=%s] [events=%s] [kide=%s] [cb=%p]", 
 		e, 
 		evf->fd, 
 		op == EPOLL_CTL_ADD  ? "EPOLL_CTL_ADD": "EPOLL_CTL_MOD", 
 		ev.events ^ (EPOLLIN | EPOLLOUT) ? (ev.events & EPOLLOUT ? "EPOLLOUT" : (ev.events & EPOLLIN) ? "EPOLLIN": "") : "EPOLLIN|EPOLLOUT",
-		e->kide & E_READ ? "E_READ": (e->kide & E_WRITE ? "E_WRITE": ""), 
+		e->kide ^ (E_READ | E_WRITE) ? (e->kide & E_WRITE ? "E_WRITE": (e->kide & E_READ) ? "E_READ" : "") : "E_READ|E_WRITE",
 		e->cb);
 
 	if (evf->event.kide & E_READ)
@@ -909,31 +910,47 @@ static int epoll_detach(struct eb_t *ebt, struct ev *e)
 	struct epoll_event 	ev;
 	struct ebt_epoll 	*epo = (struct ebt_epoll *) ebt;
 	struct ev_io 		*evf = (struct ev_io *) e;
-	struct ev_io 		**evq;
 
-	int events = 0;
-	int want   = evf->event.kide;
+	int events = (e->kide & E_READ ? EPOLLIN : 0) | (e->kide & E_WRITE ? EPOLLOUT : 0);
+	int op     = EPOLL_CTL_DEL;
+	int rd     = 1; 
+	int wd     = 1;
 
-	if (want & E_READ)
+	if (events ^ (EPOLLIN|EPOLLOUT))
 	{
-		events |= EPOLLIN;
+		if ((events & EPOLLIN) && epo->writev[evf->fd] != NULL)
+		{
+			wd     = 0;
+			events = EPOLLOUT;
+			op     = EPOLL_CTL_MOD;
+		}
+		else if ((events & EPOLLOUT) && epo->readev[evf->fd] != NULL)
+		{
+			rd     = 0;
+			events = EPOLLIN;
+			op     = EPOLL_CTL_MOD;
+		}
 	}
-	else if (want & E_WRITE)
-	{
-		events |= EPOLLOUT;
-	}
 
-	ev.events = want;
+	ev.events   = events;
+	ev.data.u64 = evf->fd;
 
-	if (epoll_ctl(epo->epfd, want ? EPOLL_CTL_MOD : EPOLL_CTL_DEL, evf->fd, &ev) < 0)
+	if (epoll_ctl(epo->epfd, op, evf->fd, &ev) < 0)
 	{
-		err_msg("ev: [ev=%p] [fd=%d] [op=%s] [events=%d]",
-			ev,
-			evf->fd,
-			"EPOLL_CTL_DEL"
-		);
+		err_msg("epoll_ctl error: [errno=%d] [errstr=%s]", errno, strerror(errno));
 		return -1;
 	}
+
+	//debug info
+	err_msg("ev: [ev=%p] [fd=%d] [op=%s] [events=%s]",
+		e,
+		evf->fd,
+		op == EPOLL_CTL_DEL ? "EPOLL_CTL_DEL": "EPOLL_CTL_MOD",
+		ev.events ^ (EPOLLIN | EPOLLOUT) ? (ev.events & EPOLLOUT ? "EPOLLOUT" : (ev.events & EPOLLIN) ? "EPOLLIN": "") : "EPOLLIN|EPOLLOUT"
+	);
+
+	if (rd) epo->readev[evf->fd] = NULL;
+	if (wd) epo->writev[evf->fd] = NULL;
 
 	return 0;
 }
@@ -1369,7 +1386,7 @@ void printEbt(struct eb_t *ebt)
 	}
 
 	//print readev
-	int i;
+	int i, numq = 0;
 	struct ev_io *evi;
 	for (i = 0; i < epo->epsz; i++)
 	{
@@ -1415,7 +1432,7 @@ void printEbt(struct eb_t *ebt)
 
 	err_msg("ebt total ev nums: [num=%d]", ebt->num);
 	err_msg("ebt total timer nums: [numtimers=%d]", ebt->numtimers);
-	err_msg("ebt total dispatchq nums: []");
+	err_msg("ebt total dispatchq nums: [nums=%d]", numq);
 
 	printf("\n\n\n");
 }
@@ -1527,7 +1544,7 @@ int main(int argc, char *argv[])
 	printf ("\n\n");
 
 	struct timeval tv = {5, 0};
-	struct ev *t1, *t2, *t3;
+	struct ev *t1, *t2, *t3, *t4;
 	char *buf ="###__---%%%%||||bbbbbbbbbb";
 	int j, k, ret;
 
@@ -1549,24 +1566,27 @@ int main(int argc, char *argv[])
 	//test io fd
 	struct ev *ef;
 
-	ef = ev_write(0, fcb, buf);
-	ef->kide |= E_READ;
-	ret = ev_attach(ef, nebt);
+	// ef = ev_write(0, fcb, buf);
+	// ef->kide |= E_READ;
+	// ret = ev_attach(ef, nebt);
 
-	// for (j = 0; j < 10; j++)
-	// {
-	// 	ef  = ev_write(j, fcb, buf);
-	// 	ret = ev_attach(ef, nebt);
-	// }
+	for (j = 0; j < 10; j++)
+	{
+		ef  = ev_write(j, fcb, buf);
+		ret = ev_attach(ef, nebt);
 
-	// for (j = 0; j < 10; j++)
-	// {
-	// 	ef  = ev_read(j, fcb, buf);
-	// 	ret = ev_attach(ef, nebt);
+		if (j == 0)
+			t4 = ef;
+	}
 
-	// 	if (j == 0)
-	// 		t3 = ef;
-	// }
+	for (j = 0; j < 10; j++)
+	{
+		ef  = ev_read(j, fcb, buf);
+		ret = ev_attach(ef, nebt);
+
+		if (j == 0)
+			t3 = ef;
+	}
 
 	//test flag
 	struct ev *evf;
@@ -1583,7 +1603,8 @@ int main(int argc, char *argv[])
 
 	ev_detach(t1, nebt);
 	ev_detach(t2, nebt);
-	// ev_detach(t3, nebt);
+	ev_detach(t3, nebt);
+	ev_detach(t4, nebt);
 
 	printEbt(nebt);
 
