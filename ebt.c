@@ -1141,6 +1141,7 @@ static int timer_attach(struct eb_t *ebt, struct ev_timer *evt)
 		timerclear(&ebt->timerdebt);
 	}
 
+	//刚加入队列时, 定时器剩余时间等于定时时间
 	evt->remain = evt->tv;
 	return timer_insert(ebt, evt);
 }
@@ -1157,6 +1158,121 @@ static int timer_detach(struct eb_t *ebt, struct ev_timer *evt)
 		timerclear(&ebt->timerdebt);
 
 	return 0;
+}
+
+static int active_events(struct eb_t *ebt, const struct timeval *start, struct timeval *end)
+{
+	struct ev_timer *timer = NULL;
+	struct ev_flag *evf;
+	struct timeval tv;
+	unsigned int i;
+
+	/* 如果存在用户自定义事件, 也放到dispatchq队列 */
+	TAILQ_FOREACH(evf, &ebt->flags, flags)	
+	{
+		if (evf->flag)
+			eventq_in((struct ev *) evf);
+	}
+
+	if (TAILQ_EMPTY(&ebt->dispatchq))
+		return 0;
+
+	/* 定时器处理 */
+	if (ebt->numtimers != 0)
+	{
+		static const struct timeval zero = {0, 0};
+
+		timer = RB_MIN(timer_tree, &ebt->timers);
+		timersub(&timer->remain, &ebt->timerdebt, &tv);
+
+		/* 反应堆dispatch */
+		if (timercmp(&tv, &zero, >=) && ebt->ebo->loop(ebt, &tv) < 0)
+			return -1;
+	}
+	else
+	{
+		if (ebt->ebo->loop(ebt, NULL) < 0)
+			return -1;
+	}
+
+	gettimeofday(end, NULL);
+
+	if (timer == NULL)
+		return 0;
+	timersub(end, start, &tv);
+	timeradd(&ebt->timerdebt, &tv, &ebt->timerdebt);
+	if (timercmp(&ebt->timerdebt, &timer->remain, <))
+		return 0;
+
+	/* 更新所有定时器 */
+	RB_FOREACH(timer, timer_tree, &ebt->timers)
+	{
+		timersub(&timer->remain, &ebt->timerdebt, &timer->remain);
+
+		if (timer->remain.tv_sec < 0 || (timer->remain.tv_sec == 0 && timer->remain.tv_usec <= 0))
+			eventq_in((struct ev *) timer);
+	}
+
+	timerclear(&ebt->timerdebt);
+
+	return 0;
+}
+
+/**
+ * 
+ * 触发队列中的就绪事件
+ * 
+ * @param ebt struct eb_t*
+ * 
+ */
+static void dispatch_queue(struct eb_t *ebt)
+{
+	struct ev *e;
+
+	if (!TAILQ_EMPTY(&ebt->dispatchq))
+	{
+		enum e_opt opt;
+		int num;
+		for (e = TAILQ_FIRST(&ebt->dispatchq); e; e = TAILQ_FIRST(&ebt->dispatchq))
+		{
+			/* 从队列移除 */
+			TAILQ_REMOVE(&ebt->dispatchq, e, dispatchq);
+			e->opt &= ~E_QUEUE;
+			
+			switch (e->kide)
+			{
+				case E_READ:
+				case E_WRITE:
+					num = ((struct ev_io *) e)->fd;
+					break;
+
+				default:
+					num = -1;
+					break;
+			}
+
+			/* 如果是一次性的事件? 立刻移除 */
+			opt = e->opt;
+			e->opt &= ~ E_FREE;
+			if (e->opt & E_ONCE)
+				ev_detach(e);
+
+			/* 调用事件处理函数 */
+			if (e != NULL)
+				e->cb(num, e->arg);
+
+			/* 如果事件处理函数中, 删除了该事件? */
+			if (!ev_attach(e))
+				return;
+
+			/* 如果事件从队列被删除了, 要释放其内存空间? */
+			if (opt & (E_ONCE | E_FREE))
+				ev_free(e);
+			else if ( e->kide == E_TIMER)
+				//定时器被触发开后, 重新设置并投递定时器队列
+				timer_reset((struct ev_timer *) e);
+		}
+	}
 }
 
 /******************************************************************/
@@ -1310,7 +1426,7 @@ struct eb_t * ebt_new(enum e_kide kides)
 int ebt_loop(struct eb_t *ebt)
 {
 	struct timeval tv[2];
-	int i, r;
+	int i, ret;
 
 	ebt->broken = 0;
 
@@ -1323,14 +1439,19 @@ int ebt_loop(struct eb_t *ebt)
 
 	while (ebt->num > 0 && !ebt->broken)
 	{
+		/* 等待事件发生 */
+		ret = active_events(ebt, tv + i, tv + (!i));
+		if (ret < 0)
+			break;
 
+		i = !i;
 	}
 
 	/* ebt循环结束后, 析构 */
 	if (ebt->ebo->destruct != NULL && ebt->ebo->destruct(ebt) < 0)
 		return -1;
 
-	return r;
+	return ret;
 }
 
 void ebt_break(struct eb_t *ebt)
@@ -1355,10 +1476,10 @@ void cb (short num, void *arg)
 
 void tcb(short num, void *arg)
 {
-	struct ev_timer *evt = (struct ev_timer *)arg;
 
+	struct ev_timer *evt = (struct ev_timer *) arg;
 	err_msg("tcb was invoke: [tv.tv_sec=%d] [tv.tv_usec=%d] [ev_timer=%p]", evt->remain.tv_sec, evt->remain.tv_usec, arg);
-	err_msg("tcb arg: [arg=%s]", (char *)(evt->event.arg));
+	// err_msg("tcb arg: [arg=%s]", (char *)(arg));
 }
 
 void fcb(short num, void *arg)
@@ -1552,12 +1673,13 @@ int main(int argc, char *argv[])
 	printEbt(nebt);
 
 	//test timer
-	struct ev *et;
+	// struct ev *et;
 	for (j = 0; j < 10; j++)
 	{
-		et  = ev_timer(&tv, tcb, buf);
+		struct ev *et  = ev_timer(&tv, tcb, et);
 		ret = ev_attach(et, nebt);
 
+		eventq_in(et);
 		//保存第5个
 		if (j == 4)
 			t1 = et;
@@ -1605,6 +1727,8 @@ int main(int argc, char *argv[])
 	ev_detach(t2, nebt);
 	ev_detach(t3, nebt);
 	ev_detach(t4, nebt);
+
+	dispatch_queue(nebt);
 
 	printEbt(nebt);
 
