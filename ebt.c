@@ -346,14 +346,14 @@ int cqueue_push(struct cqueue *cq, void *item, int item_size)
 
 int cqueue_wait(struct cqueue *cq)
 {
-	uint64_t flag;
-	return read(cq->pipes[0], &flag, sizeof(flag));
+	uint64_t data;
+	return read(cq->pipes[0], &data, sizeof(data));
 }
 
 int cqueue_notify(struct cqueue *cq)
 {
-	uint64_t flag = 1;
-	return write(cq->pipes[1], &flag, sizeof(flag));
+	uint64_t data = 1;
+	return write(cq->pipes[1], &data, sizeof(data));
 }
 
 void cqueue_free(struct cqueue *cq)
@@ -1882,5 +1882,71 @@ int main(int argc, char *argv[])
 	printCqueue(cq);
 
 	cqueue_free(cq);
+
+	printf("\n\n");
+
+	cq = cqueue_new(1024 * 80, 1000, QF_NOTIFY | QF_LOCK | QF_SHM);
+
+	printCqueue(cq);
+
+	pid_t pid;
+	int z;
+	for (z = 0; z < 5; z++)
+	{
+		if ((pid = fork()) < 0)
+		{
+			err_msg("fork");
+			exit(1);
+		}
+		else if (pid > 0)
+		{
+			err_msg("created child process success. [pid = %d]", (int)pid);
+			continue;
+		}
+		else
+		{
+			//child process
+			int recvn = 0;
+			struct item_bz tm_bz;
+			while (1)
+			{
+				if (cqueue_wait(cq) > 0)
+				{
+					if (cqueue_pop(cq, &tm_bz, sizeof(struct item_bz)) < 0)
+						continue;
+					recvn++;
+
+					err_msg("worker[%d] finish: [buf=%s] [rand=%d]", z, tm_bz.buf, tm_bz.a);
+				}
+			}
+			err_msg("worker[%d] finish: [recvn=%d]", z, recvn);
+			exit(0);
+		}
+	}
+
+	label: sleep(1);
+
+	int sendn = 0;
+	int inum = 1000;
+	while (inum > 0)
+	{
+		struct item_bz ibz = {"--||||||||mmmmmm$$########", rand() % 11, &ibz};
+		cqueue_push(cq, &ibz, sizeof (struct item_bz));
+		cqueue_notify(cq);
+		sendn++;
+		inum--;
+	}
+
+	printCqueue(cq);
+
+	err_msg("master send finish: [num=%d] [sendn=%d]", inum, sendn);
+	int status;
+	for (z = 0; z < 5; z++)
+	{
+		wait(&status);
+	}
+
+	cqueue_free(cq);
+
 	return 0;	
 }
