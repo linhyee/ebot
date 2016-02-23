@@ -12,6 +12,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/queue.h>
 #include <sys/tree.h>
 #include <sys/mman.h>
@@ -47,6 +48,10 @@ static void err_msg_(const char *fmt, ...)
 
 /**
   * print message and return to caller
+  * 
+  * \param errnoflag int
+  * \param fmt       const char*
+  * \param ap        va_list
   * 
   */
 static void err_doit(int errnoflag, const char *fmt, va_list ap)
@@ -94,79 +99,48 @@ static void err_doit(int errnoflag, const char *fmt, va_list ap)
 #endif
 
 /******************************************************************/
-/* cqueue                                                         */
+/* chan                                                           */
 /******************************************************************/
-enum q_flag
+enum chan_flag
 {
-	QF_LOCK   = 1u << 1,
-	QF_NOTIFY = 1u << 2,
-	QF_SHM    = 1u << 3,
+	CHAIN_LOCK   = 1u << 1,
+	CHAIN_NOTIFY = 1u << 2,
+	CHAIN_SHM    = 1u << 3,
 };
 
-struct cq_item
+struct chan_t
 {
 	int length;
 	char data[0];
 };
 
-struct cqueue 
+struct chan
 {
 	int head;					/* queue head */
 	int tail; 					/* queue tail */
-	int capacity; 				/* the queue capacity */
+	int size; 					/* the queue capacity */
 	char head_tag;				/* tag whether elem already in head */
 	char tail_tag;				/* tag whether elem already in tail*/
 	int num; 					/* current total elements */
-	int flags;					/* queue flags supported */
-	int max_elemsize;			/* max element size */
+	int flag;					/* queue flag */
+	int maxlen;					/* max element size */
 	void *mem;					/* memory block */
 	pthread_mutex_t lock;
 	pthread_mutexattr_t attr;
-	int pipes[2];
+	int eventfd; 				/* <sys/eventfd.h> for notification */
 };
 
-#define CQ_MINMEMORY_CAPACITY 		(1024 * 64) //最小内存分配
-#define cqueue_empty(q)				(q->num == 0)
-#define cqueue_full(q)				((q->head == q->tail) && ( q->tail_tag != q->head_tag))
+#define CHAIN_MINMEM_LENGTH (1024 * 64) //最小内存分配
+#define chan_empty(q)		(q->num == 0)
+#define chan_full(q)		((q->head == q->tail) && ( q->tail_tag != q->head_tag))
 
-static set_nonblock(int fd, int nonblock)
+struct chan * chan_new(int size, int maxlen, int flag)
 {
-	int opts, ret;
-
-	do {
-		opts = fcntl(fd, F_GETFL);
-	}
-	while(opts < 0 && errno == EINTR);
-
-	if (opts < 0)
-	{
-		err_msg("fcntl(%d, F_GETFL) failed.", fd);
-		exit(1);
-	}
-
-	if (nonblock)
-		opts = opts | O_NONBLOCK;
-	else
-		opts = opts | ~O_NONBLOCK;
-
-	do {
-		ret = fcntl(fd, F_SETFL, opts);
-	}
-	while (ret < 0 && errno == EINTR);
-
-	if (ret < 0)
-		err_msg("fcntl(%d, F_SETFL, opts) failed.", fd);
-}
-
-struct cqueue * cqueue_new(int capacity, int max_elemsize, enum q_flag flags)
-{
-	assert(capacity > CQ_MINMEMORY_CAPACITY + max_elemsize);
-
+	assert(size > CHAIN_MINMEM_LENGTH + maxlen);
 	void *mem;
-	int  ret = 0;
+	int  ret, efd;
 
-	/* use share memory */
-	if (flags & QF_SHM)
+	if (flag & CHAIN_SHM)
 	{
 		int  shmfd    = -1;
 		int  shmflag  = MAP_SHARED;
@@ -179,7 +153,7 @@ struct cqueue * cqueue_new(int capacity, int max_elemsize, enum q_flag flags)
 			return NULL;		
 #endif
 
-		mem = mmap(NULL, capacity, PROT_READ | PROT_WRITE, shmflag, shmfd, 0);
+		mem = mmap(NULL, size, PROT_READ | PROT_WRITE, shmflag, shmfd, 0);
 
 #ifdef MAP_FAILED
 		if (mem == MAP_FAILED)
@@ -193,7 +167,7 @@ struct cqueue * cqueue_new(int capacity, int max_elemsize, enum q_flag flags)
 	}
 	else
 	{
-		mem = malloc(capacity);
+		mem = malloc(size);
 
 		if (mem == NULL)
 		{
@@ -202,26 +176,26 @@ struct cqueue * cqueue_new(int capacity, int max_elemsize, enum q_flag flags)
 		}
 	}
 
-	struct cqueue *cq = mem;
-	mem += sizeof(struct cqueue);
-	memset(cq, 0, sizeof(struct cqueue));
+	struct chan *ch = mem;
+	mem += sizeof(struct chan);
+	memset(ch, 0, sizeof(struct chan));
 
-	cq->mem          = mem;
-	cq->capacity     = capacity;
-	cq->max_elemsize = max_elemsize;
-	cq->flags        = flags;
+	ch->mem    = mem;
+	ch->size   = size;
+	ch->maxlen = maxlen;
+	ch->flag   = flag;
 
-	if (flags & QF_LOCK)
+	if (flag & CHAIN_LOCK)
 	{
-		pthread_mutexattr_init(&cq->attr);
-		pthread_mutexattr_setpshared(&cq->attr, PTHREAD_PROCESS_SHARED);
+		pthread_mutexattr_init(&ch->attr);
+		pthread_mutexattr_setpshared(&ch->attr, PTHREAD_PROCESS_SHARED);
 
-		ret = pthread_mutex_init(&cq->lock, &cq->attr);
+		ret = pthread_mutex_init(&ch->lock, &ch->attr);
 
 		if (ret < 0)
 		{
-			if (flags & QF_SHM)
-				munmap(mem, capacity);
+			if (flag & CHAIN_SHM)
+				munmap(mem, size);
 			else
 				free(mem);
 
@@ -231,152 +205,158 @@ struct cqueue * cqueue_new(int capacity, int max_elemsize, enum q_flag flags)
 		}
 	}
 
-	if (flags & QF_NOTIFY)
+	if (flag & CHAIN_NOTIFY)
 	{
-		ret = pipe(cq->pipes);
-		if (ret < 0)
-		{
-			err_msg("pipe create fail. error: %s[%d]", strerror(errno), errno);
-		}
-		else
-		{
-			set_nonblock(cq->pipes[0], 1);
-			set_nonblock(cq->pipes[1], 1);
-		}
+		efd = eventfd(0, EFD_NONBLOCK | EFD_SEMAPHORE);
+		ch->eventfd = efd;
 	}
 
-	return cq;
+	return ch;
 }
 
-int cqueue_shift(struct cqueue *cq, void *item, int item_size)
+int chan_pop(struct chan *ch, void *out, int buf_len)
 {
-	/* if cqueue was empty*/
-	if (cqueue_empty(cq))	
+	assert(ch->flag & CHAIN_LOCK);
+
+	int n;
+	pthread_mutex_lock(&ch->lock);
+	n = chan_out(ch, out, buf_len);
+	pthread_mutex_unlock(&ch->lock);
+
+	return n;
+}
+
+int chan_push(struct chan *ch, void *in, int buf_len)
+{
+	assert(ch->flag & CHAIN_LOCK);
+
+	int ret;
+	pthread_mutex_lock(&ch->lock);
+	ret = chan_in(ch, in, buf_len);
+	pthread_mutex_unlock(&ch->lock);
+
+	return ret;
+}
+
+int chan_out(struct chan *ch, void *out, int buf_len)
+{
+	//队列为空
+	if (chan_empty(ch))	
 	{
-		/* important! avoid thread to get lock again */
+		//这里非常重要,避免此线程再次获得锁
+		sched_yield(); // or usleep(1);
+		return -1;
+	}
+	struct chan_t *cht = ch->mem + ch->head;
+	assert(buf_len >= cht->length);
+
+	memcpy(out, cht->data, cht->length);
+	ch->head += (cht->length + sizeof(cht->length));
+
+	if (ch->head >= ch->size)
+	{
+		ch->head = 0;
+		ch->head_tag = 1 - ch->head_tag;
+	}
+
+	ch->num--;
+
+	return cht->length;
+}
+
+int chan_in(struct chan *ch, void *in, int buf_len)
+{
+	assert(buf_len < ch->maxlen);
+
+	//队列满
+	if (chan_full(ch))
+	{
 		sched_yield();
-		//usleep(1);
 		return -1;
 	}
 
-	struct cq_item *unit = cq->mem + cq->head;
-	assert(item_size >= unit->length);
-
-	memcpy(item, unit->data, unit->length);
-	cq->head += (unit->length + sizeof(unit->length));
-
-	if (cq->head >= cq->capacity)
-	{
-		cq->head = 0;
-		cq->head_tag = 1 - cq->head_tag;
-	}
-
-	cq->num--;
-
-	return unit->length;
-}
-
-int cqueue_unshift(struct cqueue *cq, void *item, int item_size)
-{
-	assert(item_size < cq->max_elemsize);
-
-	/* when cqueue was empty! */
-	if (cqueue_full(cq))
-	{
-		sched_yield();
-		return -1;
-	}
-
-	struct cq_item *unit;
+	struct chan_t *cht;
 	int msize;
 
-	msize = sizeof(unit->length) + item_size;
+	msize = sizeof(cht->length) + buf_len;
 
-	if (cq->tail < cq->head)
+	if (ch->tail < ch->head)
 	{
-		if ((cq->head - cq->tail) < msize)
+		if ((ch->head - ch->tail) < msize)
 			return -1;
 
-		unit = cq->mem + cq->tail;
-		cq->tail += msize;
+		cht = ch->mem + ch->tail;
+		ch->tail += msize;
 	}
 	else
 	{
-		unit = cq->mem + cq->tail;
-		cq->tail += msize;
-		if (cq->tail >= cq->capacity)
+		cht = ch->mem + ch->tail;
+		ch->tail += msize;
+		if (ch->tail >= ch->size)
 		{
-			cq->tail = 0;
-			cq->tail_tag = 1 - cq->tail_tag;
+			ch->tail = 0;
+			ch->tail_tag = 1 - ch->tail_tag;
 		}
 	}
-	cq->num++;
-	unit->length = item_size;
-	memcpy(unit->data, item, item_size);
+	ch->num++;
+	cht->length = buf_len;
+	memcpy(cht->data, in, buf_len);
 
 	return 0;
 }
 
-
-int cqueue_pop(struct cqueue *cq, void *item, int item_size)
+int chan_wait(struct chan *ch)
 {
-	assert(cq->flags & QF_LOCK);
+	assert(ch->flag & CHAIN_NOTIFY);
 
-	int ret = 0;
-
-	pthread_mutex_lock(&cq->lock);
-	ret = cqueue_shift(cq, item, item_size);
-	pthread_mutex_unlock(&cq->lock);
-
-	return ret;
-}
-
-int cqueue_push(struct cqueue *cq, void *item, int item_size)
-{
-	assert(cq->flags & QF_LOCK);
-
-	int ret = 0;
-
-	pthread_mutex_lock(&cq->lock);
-	ret = cqueue_unshift(cq, item, item_size);
-	pthread_mutex_unlock(&cq->lock);
-
-	return ret;
-}
-
-int cqueue_wait(struct cqueue *cq)
-{
+	int ret, timeout = 0;
 	uint64_t flag;
-	return read(cq->pipes[0], &flag, sizeof(flag));
-}
 
-int cqueue_notify(struct cqueue *cq)
-{
-	uint64_t flag = 1;
-	return write(cq->pipes[1], &flag, sizeof(flag));
-}
-
-void cqueue_free(struct cqueue *cq)
-{
-	if (cq->flags & QF_LOCK)
-		pthread_mutex_destroy(&cq->lock);
-
-	if (cq->flags & QF_NOTIFY)
+	while (1)
 	{
-		close(cq->pipes[0]);
-		close(cq->pipes[1]);
+		ret = read(ch->eventfd, &flag, sizeof(uint64_t));
+
+		if (ret < 0 && errno == EINTR)
+			continue;
+		break;
 	}
 
-	if (cq->flags & QF_SHM)
-		munmap(cq, cq->capacity);
-	else
-		free(cq);
+	return 0;
 }
 
-void printCqueue(struct cqueue *cq)
+int chan_notify(struct chan *ch)
 {
-	err_msg("cq: [adr=%p] [mem=%p] [num=%d] [head=%d] [tail=%d] [tail_tag=%d] [head_tag=%d]", 
-		cq, cq->mem, cq->num, cq->head, cq->tail, (int)cq->tail_tag, (int)cq->head_tag);
+	assert(ch->flag & CHAIN_NOTIFY);
+	int ret;
+	uint64_t flag = 1;	
+	
+	while (1)	
+	{
+		ret = write(ch->eventfd, &flag, sizeof(uint64_t));
+
+		if (ret < 0 && errno == EINTR)
+				continue;
+		break;
+	}
+
+	return ret;
+}
+
+void chan_free(struct chan *ch)
+{
+	if (ch->flag & CHAIN_LOCK)
+		pthread_mutex_destroy(&ch->lock);
+
+	if (ch->flag & CHAIN_NOTIFY)
+		close(ch->eventfd);
+
+	if (ch->flag & CHAIN_SHM)
+		munmap(ch->mem, ch->size);
+	else
+	{
+		if (ch->mem)
+			free(ch->mem);
+	}
 }
 
 /******************************************************************/
@@ -1507,9 +1487,6 @@ void ebt_free(struct eb_t *ebt)
 	ebt->ebo->free(ebt);
 	free(ebt);
 }
-/******************************************************************/
-/* network                                                        */
-/******************************************************************/
 
 
 /******************************************************************/
@@ -1519,13 +1496,6 @@ struct ev_param
 {
 	char buf[256];
 	struct timeval tv;
-};
-
-struct item_bz
-{
-	char buf[128];
-	int a;
-	struct item_bz *next;
 };
 
 void cb (short num, void *arg)
@@ -1809,59 +1779,28 @@ int main(int argc, char *argv[])
 
 
 
-	// // test event loop
-	// struct eb_t *ebt1 = ebt_new(E_READ | E_WRITE | E_TIMER);
+	// test event loop
+	struct eb_t *ebt1 = ebt_new(E_READ | E_WRITE | E_TIMER);
 
-	// for (j = 0; j < 10; j++)
-	// {
-	// 	struct ev_param *dt = calloc(1, sizeof(struct ev_param));
-	// 	memcpy(dt->buf, buf, strlen(buf) + 1);
-	// 	tv.tv_sec     = rand() % 15 + 5;
-	// 	tv.tv_usec    = 0;
-	// 	dt->tv        = tv;
+	for (j = 0; j < 10; j++)
+	{
+		struct ev_param *dt = calloc(1, sizeof(struct ev_param));
+		memcpy(dt->buf, buf, strlen(buf) + 1);
+		tv.tv_sec     = rand() % 15 + 5;
+		tv.tv_usec    = 0;
+		dt->tv        = tv;
 
-	// 	struct ev *et = ev_timer(&tv, tcb, dt);
-	// 	ret           = ev_attach(et, ebt1);
-	// }
+		struct ev *et = ev_timer(&tv, tcb, dt);
+		ret           = ev_attach(et, ebt1);
+	}
 
-	// printEbt(ebt1);
+	printEbt(ebt1);
 
-	// ebt_loop(ebt1);
+	ebt_loop(ebt1);
 
-	// printEbt(ebt1);
+	printEbt(ebt1);
 
-	// ebt_free(ebt1);
+	ebt_free(ebt1);
 
-
-	struct cqueue *cq = cqueue_new(1024 * 128, 512, 0);
-
-	printCqueue(cq);
-
-	struct item_bz bz = {"BB|||-----HELC%%%%", 1, &bz};
-	char bf[256] = "%%||@$$$$___|||@#FEWCCCsabss%%";
-	int a = 128;
-
-	cqueue_unshift(cq, &bz, sizeof(struct item_bz));
-	cqueue_unshift(cq, bf, 256);
-	cqueue_unshift(cq, &a, sizeof(a));
-
-	printCqueue(cq);
-
-	struct item_bz az;
-	int af[256];
-	int b;
-
-	cqueue_shift(cq, &az, sizeof(struct item_bz));
-	err_msg("item_bz:[buf=%s] [a=%d] [next=%p]", az.buf, az.a, az.next);
-
-	cqueue_shift(cq, af, 256);
-	err_msg("af: [af=%s]", af);
-
-	cqueue_shift(cq, &b, sizeof(b));
-	err_msg("b: [b=%d]", b);
-
-	printCqueue(cq);
-
-	cqueue_free(cq);
 	return 0;	
 }
