@@ -1862,6 +1862,25 @@ int main(int argc, char *argv[])
 
 	printCqueue(cq);
 
+
+	int s;
+	for (s = 0; s < 10; s++)
+	{
+		struct item_bz ibz = {"bbbb||||-------------%%%%%%+++++++$$", rand() % 10, &ibz};
+		cqueue_unshift(cq, &ibz, sizeof(struct item_bz));
+	}
+
+	printCqueue(cq);
+
+	while (!cqueue_empty(cq))
+	{
+		struct item_bz tmp_bz;
+		cqueue_shift(cq, &tmp_bz, sizeof(struct item_bz));
+		err_msg("item_bz:[buf=%s] [a=%d] [next=%p]", tmp_bz.buf, tmp_bz.a, tmp_bz.next);
+	}
+
+	printCqueue(cq);
+
 	cqueue_free(cq);
 	return 0;	
 }
