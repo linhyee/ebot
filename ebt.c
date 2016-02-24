@@ -253,6 +253,7 @@ int cqueue_shift(struct cqueue *cq, void *item, int item_size)
 	/* if cqueue was empty*/
 	if (cqueue_empty(cq))	
 	{
+		// err_msg("cqueue is empty.");
 		/* important! avoid thread to get lock again */
 		sched_yield();
 		//usleep(1);
@@ -283,7 +284,9 @@ int cqueue_unshift(struct cqueue *cq, void *item, int item_size)
 	/* when cqueue was empty! */
 	if (cqueue_full(cq))
 	{
+		// err_msg("cqueue is full.");
 		sched_yield();
+
 		return -1;
 	}
 
@@ -375,8 +378,7 @@ void cqueue_free(struct cqueue *cq)
 
 void printCqueue(struct cqueue *cq)
 {
-	err_msg("cq: [adr=%p] [mem=%p] [num=%d] [head=%d] [tail=%d] [tail_tag=%d] [head_tag=%d]", 
-		cq, cq->mem, cq->num, cq->head, cq->tail, (int)cq->tail_tag, (int)cq->head_tag);
+	err_msg("cq: [adr=%p] [mem=%p] [num=%d] [head=%d] [tail=%d] [tail_tag=%d] [head_tag=%d]", cq, cq->mem, cq->num, cq->head, cq->tail, (int)cq->tail_tag, (int)cq->head_tag);
 }
 
 /******************************************************************/
@@ -1890,8 +1892,8 @@ int main(int argc, char *argv[])
 	printCqueue(cq);
 
 	pid_t pid;
-	int z;
-	for (z = 0; z < 5; z++)
+	int z, worker_num = 5;
+	for (z = 0; z < worker_num; z++)
 	{
 		if ((pid = fork()) < 0)
 		{
@@ -1908,6 +1910,13 @@ int main(int argc, char *argv[])
 			//child process
 			int recvn = 0;
 			struct item_bz tm_bz;
+			char fname[56];
+			char mbuff[256];
+			FILE *fp;
+
+			sprintf(fname, "/root/src/log_%d.txt", z);
+			fp = fopen(fname, "a+");
+
 			while (1)
 			{
 				if (cqueue_wait(cq) > 0)
@@ -1916,10 +1925,15 @@ int main(int argc, char *argv[])
 						continue;
 					recvn++;
 
-					err_msg("worker[%d] finish: [buf=%s] [rand=%d]", z, tm_bz.buf, tm_bz.a);
+					err_msg("worker[%d] recv: [buf=%s] [rand=%d]", z, tm_bz.buf, tm_bz.a);
+					sprintf(mbuff, "worker[%d] recv: [buf=%s] [rand=%d]\n", z, tm_bz.buf, tm_bz.a);
+
+					//write log to file[i];
+					fputs(mbuff, fp);
 				}
 			}
 			err_msg("worker[%d] finish: [recvn=%d]", z, recvn);
+			fclose(fp);
 			exit(0);
 		}
 	}
@@ -1927,21 +1941,23 @@ int main(int argc, char *argv[])
 	label: sleep(1);
 
 	int sendn = 0;
-	int inum = 1000;
+	int inum = 10000;
 	while (inum > 0)
 	{
 		struct item_bz ibz = {"--||||||||mmmmmm$$########", rand() % 11, &ibz};
-		cqueue_push(cq, &ibz, sizeof (struct item_bz));
-		cqueue_notify(cq);
-		sendn++;
-		inum--;
+		if (cqueue_push(cq, &ibz, sizeof (struct item_bz)) == 0)
+		{
+			cqueue_notify(cq);
+			sendn++;
+			inum--;
+		}
 	}
 
 	printCqueue(cq);
 
 	err_msg("master send finish: [num=%d] [sendn=%d]", inum, sendn);
 	int status;
-	for (z = 0; z < 5; z++)
+	for (z = 0; z < worker_num; z++)
 	{
 		wait(&status);
 	}
