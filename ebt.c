@@ -384,7 +384,10 @@ void printCqueue(struct cqueue *cq)
 /******************************************************************/
 /* thread pool                                                    */
 /******************************************************************/
+#define atom_add(a, b) __sync_fetch_and_add(a, b)
+#define atom_sub(a, b) __sync_fetch_and_sub(a, b)
 struct thread_pool;
+typedef volatile uint32_t _u32_t;
 
 enum thread_stats
 {
@@ -424,7 +427,7 @@ struct thread_pool
     struct cqueue *cq;
     int num_threads;
     int shutdown;
-    volatile uint32_t task_num;
+    _u32_t num_tasks;
 };
 
 static void thread_setup(struct thread_entity *me)
@@ -444,6 +447,9 @@ static void thread_cleanup(struct thread_entity *me)
     close(me->notify_recv_fd);
 }
 
+/**
+ * 初始化线程池
+ */
 int thread_pool_init(struct thread_pool *pool, int num_threads)
 {
     assert(num_threads > 0);
@@ -490,7 +496,9 @@ int thread_pool_init(struct thread_pool *pool, int num_threads)
 
     pthread_mutex_init(&pool->mutex, NULL);
     pthread_cond_init(&pool->cond, NULL);
+
     pool->num_threads = num_threads;
+    pool->shutdown = 1;
 
     return 0;
 }
@@ -506,7 +514,7 @@ void thread_pool_run(struct thread_pool *pool, void *(*func)(void *))
     {
         pool->params[i].id = i;
         pool->params[i].data = pool;
-        ret = pthread_create(&((&pool->threads[i])->thread_id), &attr, func, &pool->params[i]);
+        ret = pthread_create(&((pool->threads[i]).thread_id), &attr, func, &pool->params[i]);
 
         if (ret < 0)
         {
@@ -514,6 +522,8 @@ void thread_pool_run(struct thread_pool *pool, void *(*func)(void *))
             exit(1);
         }
     }
+
+    pool->shutdown = 0;
 }
 
 int thread_pool_free(struct thread_pool *pool)
@@ -539,17 +549,18 @@ int thread_pool_free(struct thread_pool *pool)
     return 0;
 }
 
-#if 0
-//分发任务
-int thd_pool_dispatch(struct thd_pool *pool, void *task, int task_len)
+/**
+ * 线程以竞争的方式抢占任务
+ */
+int thread_pool_dispatchq(struct thread_pool *pool, void *task, int task_len)
 {
     int i, ret;
     pthread_mutex_lock(&pool->mutex);
 
-    //try 1000 times
+    //尝试1000次, 将任务打进队列
     for (i = 0; i < 1000; i++)
     {
-        ret = chan_in(pool->ch, task, int task_len);
+        ret = cqueue_unshift(pool->cq, task, task_len);
 
         if (ret < 0)
         {
@@ -564,55 +575,11 @@ int thd_pool_dispatch(struct thd_pool *pool, void *task, int task_len)
     if (ret < 0)
         return -1;
 
-    volatile uint32_t *task_num = &pool->task_num;
-    __sync_fetch_and_add(task_num, 1);
+    _u32_t *num_tasks = &pool->num_tasks;
+    atom_add(num_tasks, 1);
 
     return pthread_cond_signal(&pool->cond);
 }
-
-
-static void* thd_pool_loop(void *arg)
-{
-    struct thd_param *param = arg;
-    struct thd_pool *pool = param->data;
-    int ret, runnig, id = param->thd_id;
-    void *task;
-
-    while(runnig)
-    {
-        pthread_mutex_lock(&pool->mutex);
-
-        if (pool->shutdown)
-        {
-            pthread_mutex_unlock(&pool->mutex);
-            err_msg("thread [%d] will exit", id);
-            pthread_exit(NULL);
-        }
-
-        if (pool->task_num == 0)
-            pthread_cond_wait(&pool->cond, &pool->mutex);
-
-        err_msg("thread [%d] is starting to work", id);
-
-        ret = chan_out(&pool->ch, task, BUFSIZE);
-        pthread_mutex_unlock(&pool->mutex);
-
-        if (ret >= 0)
-        {
-            volatile uint32_t *task_num = &pool->task_num;
-            __sync_fetch_and_sub(task_num, 1);
-
-            pool->task(pool, (void *)task, ret);
-        }
-    }
-
-    if (pool->stop)
-        pool->stop(pool, id);
-
-    pthread_exit(NULL);
-    return NULL;
-}
-#endif
 
 /******************************************************************/
 /* Reactor                                                        */
@@ -1686,6 +1653,47 @@ void printEbt(struct eb_t *ebt)
     printf("\n\n\n");
 }
 
+void *thread_route(void *arg)
+{
+    pthread_t thread_id = pthread_self();
+    struct thread_param *param = (struct thread_param *) arg;
+    struct thread_pool *pool = param->data;
+    struct item_bz tm_bz;
+    int ret;
+
+    err_msg("thread [%d] is starting to work", thread_id);
+
+    while(1)
+    {
+        pthread_mutex_lock(&pool->mutex);
+
+        if (pool->shutdown)
+        {
+            pthread_mutex_unlock(&pool->mutex);
+            err_msg("thread[%d] will exit", (int)pool->threads[param->id].thread_id);
+            pthread_exit(NULL);
+        }
+
+        if (pool->num_tasks == 0)
+            pthread_cond_wait(&pool->cond, &pool->mutex);
+
+        ret = cqueue_shift(pool->cq, &tm_bz, sizeof (struct item_bz));
+
+        pthread_mutex_unlock(&pool->mutex);
+
+        if (ret >= 0)
+        {
+            _u32_t *num_tasks = &pool->num_tasks;
+            atom_sub(num_tasks, 1);
+
+            err_msg("thread[%d] work on task: [id=%d] [buf=%s]", (int)pool->threads[param->id].thread_id, tm_bz.a, tm_bz.buf);
+        }
+    }
+
+    pthread_exit(NULL);
+    return NULL;
+}
+
 int main(int argc, char *argv[])
 {
     struct eb_t ebt;
@@ -1944,6 +1952,7 @@ int main(int argc, char *argv[])
 
     printf("\n\n");
 
+#if 0
     cq = cqueue_new(1024 * 80, 1000, QF_NOTIFY | QF_LOCK | QF_SHM);
 
     printCqueue(cq);
@@ -2020,6 +2029,24 @@ int main(int argc, char *argv[])
     }
 
     cqueue_free(cq);
+#endif
+    
+    int iput;
+    int num_tasks = 1000;
+    int num_threads = 4;
+
+    struct thread_pool pool;
+    thread_pool_init(&pool, num_threads);
+
+    //分发任务
+    for (iput = 0; iput < num_tasks; iput++)
+    {
+        struct item_bz jobz = {"--|||||||||||nnnnnn%%%%%%;;;;;", rand() % 128, &jobz};
+        thread_pool_dispatchq(&pool, &jobz, sizeof(struct item_bz));
+    }
+
+    thread_pool_run(&pool, thread_route);
+    thread_pool_free(&pool);
 
     return 0;   
 }
