@@ -2038,6 +2038,9 @@ int main(int argc, char *argv[])
     struct thread_pool pool;
     thread_pool_init(&pool, num_threads);
 
+    thread_pool_run(&pool, thread_route);
+
+    main_loop: sleep(2);
     //分发任务
     for (iput = 0; iput < num_tasks; iput++)
     {
@@ -2045,7 +2048,6 @@ int main(int argc, char *argv[])
         thread_pool_dispatchq(&pool, &jobz, sizeof(struct item_bz));
     }
 
-    thread_pool_run(&pool, thread_route);
     thread_pool_free(&pool);
 
     return 0;   
