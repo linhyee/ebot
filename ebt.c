@@ -1536,7 +1536,17 @@ void ebt_free(struct eb_t *ebt)
 /******************************************************************/
 /* network                                                        */
 /******************************************************************/
+struct ebt_server
+{
+    uint16_t backlog;
+    uint8_t daemonize;
+    uint8_t num_reactor_threads;
 
+    int max_conn;
+    int max_request;
+    int timeout_sec;
+    int timeout_usec;
+};
 
 /******************************************************************/
 /* test                                                           */
