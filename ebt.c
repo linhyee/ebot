@@ -404,30 +404,32 @@ struct thread_param
 
 struct thread_entity
 {
-    int id;
-    pthread_t thread_id;
-    enum thread_stats stats;
     union {
         void *ptr;
         uint32_t u32;   
         uint64_t u64;
     } data;
-    struct cqueue *cq;
-    int notify_send_fd;
-    int notify_recv_fd;
-    struct thread_pool *pool;
+
+    int         id;
+    pthread_t   thread_id;
+    enum        thread_stats stats;
+
+    struct      cqueue *cq;
+    int         notify_send_fd;
+    int         notify_recv_fd;
+    struct      thread_pool *pool;
 };
 
 struct thread_pool
 {
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-    struct thread_entity *threads;
-    struct thread_param *params;
-    struct cqueue *cq;
-    int num_threads;
-    int shutdown;
-    _u32_t num_tasks;
+    pthread_mutex_t         mutex;
+    pthread_cond_t          cond;
+    struct thread_entity    *threads;
+    struct thread_param     *params;
+    struct cqueue           *cq;
+    int                     num_threads;
+    int                     shutdown;
+    _u32_t                  num_tasks;
 };
 
 static void thread_setup(struct thread_entity *me)
@@ -1536,17 +1538,135 @@ void ebt_free(struct eb_t *ebt)
 /******************************************************************/
 /* network                                                        */
 /******************************************************************/
-struct ebt_server
+char srv_status;
+
+enum e_fd_type
+{
+    E_FD_TCP = 0,
+    E_FD_LISTEN,
+    E_FD_CLOSE,
+    E_FD_ERROR,
+    E_FD_UDP,
+    E_FD_PIPE
+};
+
+#define E_MAX_FDTYPE      32
+#define E_BACK_LOG        512
+#define E_TIMEOUT_SEC     0
+#define E_TIMEOUT_USEC    3000000
+#define E_NUM_THREADS     4
+
+#define EV_CB_DECLARE(name, type) \
+int (*name)(struct type *w, int fdtype, int (*cb)(struct type *w, int revent))
+
+#define EV_CB_ARRAY_DECLARE(size, type) \
+int (*cbs[size])(struct type *w, int revent)
+
+#define EV_BASE(type)                        \
+    EV_CB_DECLARE(set_handle, type);         \
+    EV_CB_ARRAY_DECLARE(E_MAX_FDTYPE, type); \
+    struct eb_t *base;                       \
+    void *ptr;                               \
+    int id;                                  \
+    int status; 
+
+struct data_buffer;
+struct ev_thread
+{
+    EV_BASE(ev_thread);
+    struct data_buffer *buf;
+};
+
+struct dispatcher_thread
+{
+    EV_BASE(dispatcher_thread);
+    pthread_t thread_id;
+};
+
+struct settings
 {
     uint16_t backlog;
     uint8_t daemonize;
     uint8_t num_reactor_threads;
+
+    int sock_cli_bufsize;   //client的socket缓存设置
+    int sock_srv_bufsize;   //server的socket缓存设置
 
     int max_conn;
     int max_request;
     int timeout_sec;
     int timeout_usec;
 };
+
+struct ebt_srv
+{
+    struct settings *setting;
+    struct dispatcher_thread dispatcherd;
+    struct thread_pool pool;
+    int pipe[2];
+
+    void (*start)       (struct ebt_srv*);
+    int (*receive)      (struct ebt_srv*);
+    void (*close)       (struct ebt_srv*, int, int);
+    void (*connect)     (struct ebt_srv*, int, int);
+    void (*shutdown)    (struct ebt_srv*);
+};
+
+
+void ebt_srv_init(struct ebt_srv *srv, struct settings *setting)
+{
+    memset(srv, 0, sizeof * srv);
+    /*
+    srv->setting->backlog = E_BACK_LOG;
+    srv->setting->daemonize = 0;
+    srv->setting->num_reactor_threads = E_NUM_THREADS;
+
+    srv->setting->timeout_sec = E_TIMEOUT_SEC;
+    srv->setting->timeout_usec = E_TIMEOUT_USEC;
+    */
+    srv->setting = setting;
+
+    srv->start = NULL;
+    srv->receive = NULL;
+    srv->close = NULL;
+    srv->connect = NULL;
+    srv->shutdown = NULL;
+}
+
+int ebt_srv_create(struct ebt_srv *srv)
+{
+    int r = 0;
+    int i = 0;
+
+    if (pipe(srv->pipe) < 0)
+    {
+        err_msg("can't create pipe!");
+        return -1;
+    }
+
+    struct ev_thread *ev_thd = calloc(srv->setting->num_reactor_threads, sizeof(struct ev_thread));
+    if (ev_thd == NULL)
+    {
+        err_msg("can't malloc ev_thread");
+        return -1;
+    }
+
+    //初始化线程池   
+    thread_pool_init(&srv->pool, srv->setting->num_reactor_threads);
+
+    for (i = 0; i < srv->setting->num_reactor_threads; i++)
+    {
+        srv->pool->threads[i].data.ptr = &ev_thd[i];
+        ev_thd[i]->id = pool->threads[i].id;
+    }
+    
+    return 0;    
+}
+
+void ebt_srv_free(struct ebt_srv *srv)
+{
+    
+}
 
 /******************************************************************/
 /* test                                                           */
@@ -2040,7 +2160,8 @@ int main(int argc, char *argv[])
 
     cqueue_free(cq);
 #endif
-    
+
+#if 0 
     int iput;
     int num_tasks = 1000;
     int num_threads = 4;
@@ -2059,6 +2180,12 @@ int main(int argc, char *argv[])
     }
 
     thread_pool_free(&pool);
+#endif
+
+    struct ebt_srv srv; 
+    struct settings setting = {0};
+    ebt_srv_init(&srv, &setting);
+    ebt_srv_create(&srv);
 
     return 0;   
 }
