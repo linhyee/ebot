@@ -1540,7 +1540,7 @@ void ebt_free(struct eb_t *ebt)
 /******************************************************************/
 char srv_status;
 
-enum e_fd_type
+enum e_fd_t
 {
     E_FD_TCP = 0,
     E_FD_LISTEN,
@@ -1550,12 +1550,29 @@ enum e_fd_type
     E_FD_PIPE
 };
 
+enum e_c_t
+{
+    E_C_NULL = 0,
+    E_C_DESTROY,
+    E_C_ACCEPT,
+    E_C_LISTEN,
+    E_C_CONNECT,
+    E_C_CLOSE,
+    E_C_READY,
+    E_C_DATA,
+    E_C_LINE,
+    E_C_ERROR,
+    E_C_TIMER,
+    E_C_TICK
+};
+
 #define E_MAX_FDTYPE      32
 #define E_BACK_LOG        512
 #define E_TIMEOUT_SEC     0
 #define E_TIMEOUT_USEC    3000000
 #define E_NUM_THREADS     4
 
+#define EV_CB_PARAMS(type) struct type *w, int revent
 #define EV_CB_DECLARE(name, type) \
 int (*name)(struct type *w, int fdtype, int (*cb)(struct type *w, int revent))
 
@@ -1570,10 +1587,26 @@ int (*cbs[size])(struct type *w, int revent)
     int id;                                  \
     int status; 
 
+#define EV_CB_HANDLE_DEFINE(type)                \
+    static EV_CB_DECLARE(type##set_handle, type) \
+    {                                            \
+        if (fdtype >= E_MAX_FDTYPE)              \
+            return -1;                           \
+        else                                     \
+            type->cbs[fdtype] = cb;              \
+        return 0;                                \
+    }
+
+#define SETHANDLES                          \
+    /* 输出函数定义 */                      \
+    EV_CB_HANDLE_DEFINE(ev_thread_unit)     \
+    EV_CB_HANDLE_DEFINE(dispatcher_thread)
+
+
 struct data_buffer;
-struct ev_thread
+struct ev_thread_unit
 {
-    EV_BASE(ev_thread);
+    EV_BASE(ev_thread_unit);
     struct data_buffer *buf;
 };
 
@@ -1600,10 +1633,10 @@ struct settings
 
 struct ebt_srv
 {
-    struct settings *setting;
-    struct dispatcher_thread dispatcherd;
-    struct thread_pool pool;
-    int pipe[2];
+    struct settings             settings;
+    struct dispatcher_thread    dispatcherd;
+    struct thread_pool          pool;
+    int                         pipe[2];
 
     void (*start)       (struct ebt_srv*);
     int (*receive)      (struct ebt_srv*);
@@ -1612,19 +1645,24 @@ struct ebt_srv
     void (*shutdown)    (struct ebt_srv*);
 };
 
+SETHANDLES
+#undef SETHANDLES
 
-void ebt_srv_init(struct ebt_srv *srv, struct settings *setting)
+static void settings_init(struct settings *settings)
+{
+    settings->backlog = E_BACK_LOG;
+    settings->daemonize = 0;
+    settings->num_reactor_threads = E_NUM_THREADS;
+
+    settings->timeout_sec = E_TIMEOUT_SEC;
+    settings->timeout_usec = E_TIMEOUT_USEC;    
+}
+
+void ebt_srv_init(struct ebt_srv *srv)
 {
     memset(srv, 0, sizeof * srv);
-    /*
-    srv->setting->backlog = E_BACK_LOG;
-    srv->setting->daemonize = 0;
-    srv->setting->num_reactor_threads = E_NUM_THREADS;
-
-    srv->setting->timeout_sec = E_TIMEOUT_SEC;
-    srv->setting->timeout_usec = E_TIMEOUT_USEC;
-    */
-    srv->setting = setting;
+    //初始化配置信息
+    settings_init(&srv->settings);
 
     srv->start = NULL;
     srv->receive = NULL;
@@ -1633,6 +1671,9 @@ void ebt_srv_init(struct ebt_srv *srv, struct settings *setting)
     srv->shutdown = NULL;
 }
 
+/**
+ * 创建一个srv实例
+ */
 int ebt_srv_create(struct ebt_srv *srv)
 {
     int r = 0;
@@ -1644,7 +1685,9 @@ int ebt_srv_create(struct ebt_srv *srv)
         return -1;
     }
 
-    struct ev_thread *ev_thd = calloc(srv->setting->num_reactor_threads, sizeof(struct ev_thread));
+    struct ev_thread_unit *ev_thd = calloc(srv->settings.num_reactor_threads, 
+        sizeof(struct ev_thread_unit));
+
     if (ev_thd == NULL)
     {
         err_msg("can't malloc ev_thread");
@@ -1652,15 +1695,36 @@ int ebt_srv_create(struct ebt_srv *srv)
     }
 
     //初始化线程池   
-    thread_pool_init(&srv->pool, srv->setting->num_reactor_threads);
+    thread_pool_init(&srv->pool, srv->settings.num_reactor_threads);
 
-    for (i = 0; i < srv->setting->num_reactor_threads; i++)
+    for (i = 0; i < srv->settings.num_reactor_threads; i++)
     {
-        srv->pool->threads[i].data.ptr = &ev_thd[i];
-        ev_thd[i]->id = pool->threads[i].id;
+        srv->pool.threads[i].data.ptr = &ev_thd[i];
+        ev_thd[i].id = srv->pool.threads[i].id;
     }
     
     return 0;    
+}
+
+/**
+ * 启动一个srv实例
+ */
+int ebt_srv_start(struct ebt_srv *srv)
+{
+    struct eb_t *mbase;
+    struct timeval tv;
+    int r;
+
+    mbase = ebt_new(E_READ | E_WRITE);
+    if (mbase == NULL)
+    {
+        err_msg("can't create mbase for master thread!");
+    }
+
+    dispatcherd.base = mbase;
+    dispatcherd.thread_id = pthread_self();
+
+    return 0;
 }
 
 void ebt_srv_free(struct ebt_srv *srv)
@@ -2183,9 +2247,8 @@ int main(int argc, char *argv[])
 #endif
 
     struct ebt_srv srv; 
-    struct settings setting = {0};
-    ebt_srv_init(&srv, &setting);
+    ebt_srv_init(&srv);
     ebt_srv_create(&srv);
-
+    ebt_srv_free(&srv);
     return 0;   
 }
