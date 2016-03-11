@@ -1655,7 +1655,7 @@ struct ebt_srv
     struct settings         settings;           //应用服务配置
     struct master_reactor   mreactor;           //主反应堆
     struct thread_pool      reactor_pool;       //子反应堆线程池
-    struct thread_pool      factory_pool;   //任务调度线程池
+    struct thread_pool      factory_pool;       //任务调度线程池
     int                     pipe[2];            //通信管道
     int                     sfd;                //服务器套接字
     e_handle_t              handles[E_MAX_ETYPE];//注册到服务对象的回调 
@@ -1669,7 +1669,7 @@ struct ebt_srv
 #define ebt_srv_get_factory(srv, n) \
 (struct factory *) ebt_srv_get_reactor(srv, factory_pool, n).data.ptr
 
-static void settings_init(struct settings *settings)
+static void ebt_srv_settings_init(struct settings *settings)
 {
     settings->backlog       = E_BACK_LOG;
     settings->daemonize     = 0;
@@ -1790,7 +1790,7 @@ int ebt_srv_create(struct ebt_srv *srv)
 
     memset(srv, 0, sizeof * srv);
     //初始化配置信息
-    settings_init(&srv->settings);
+    ebt_srv_settings_init(&srv->settings);
 
     if (pipe(srv->pipe) < 0)
     {
