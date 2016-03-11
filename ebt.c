@@ -1650,6 +1650,7 @@ struct settings
 };
 
 typedef int (*e_handle_t)(struct EventData *);
+
 struct ebt_srv
 {
     struct settings         settings;           //应用服务配置
@@ -1662,12 +1663,65 @@ struct ebt_srv
 };
 
 #define ebt_srv_get_thread(srv, w, n)   (srv->w.threads[n])
+#define ebt_srv_get_param(srv, w, n)    (srv->w.params[n])
+#define ebt_srv_get_reactor(srv, n)     (struct reactor *) ebt_srv_get_thread(srv, reactor_pool, n).data.ptr
+#define ebt_srv_get_factory(srv, n)     (struct factory *) ebt_srv_get_reactor(srv, factory_pool, n).data.ptr
 
-#define ebt_srv_get_reactor(srv, n) \
-(struct child_reactor *) ebt_srv_get_thread(srv, reactor_pool, n).data.ptr
+static int ebt_srv_write(int fd, char *buf, int len)
+{
+    int nwrite = 0;
+    int total_len = 0;
 
-#define ebt_srv_get_factory(srv, n) \
-(struct factory *) ebt_srv_get_reactor(srv, factory_pool, n).data.ptr
+    while (total_len != len)
+    {
+        nwrite = write(fd, buf, len - total_len);
+        if (nwrite == -1)
+            return total_len;
+
+        if (nwrite == -1)
+        {
+            if (errno == EINTR)
+                continue;
+            else if (errno == EAGAIN)
+            {
+                sleep(1);
+                continue;
+            }
+            else
+                return -1;
+        }
+        total_len += nwrite;
+        buf += nwrite;
+    }
+
+    return total_len;
+}
+
+static ebt_srv_read(int fd, char *buf, int len)
+{
+    int n = 0, nread;
+
+    while (1)
+    {
+        nread = read(fd, buf + n, len -n);
+        if (nread < 0)
+        {
+            if (errno == EINTR) continue
+            break;
+        }
+        else if (nread == 0)
+        {
+            return 0;
+        }
+        else
+        {
+            n += nread;
+            if (n == len) break;
+            continue;
+        }
+    }
+    return n;
+}
 
 static void ebt_srv_settings_init(struct settings *settings)
 {
@@ -1705,6 +1759,7 @@ ebt_srv_reactors_init(struct ebt_srv *srv)
 
         reactor = &reactors[i];
         reactor->reactor_id = i;
+        reactor->ptr = srv;
 
         //TODO: 创建data_buf   
     }
@@ -1744,9 +1799,65 @@ ebt_srv_factories_init(struct ebt_srv *srv)
     return 0;
 }
 
-static int ebt_srv_poll_start(struct ebt_srv *srv);
-static int ebt_srv_poll_routine(struct ebt_srv *srv);
-static int ebt_srv_poll_event_process(short num, struct ebt_srv *srv);
+static void* ebt_srv_poll_routine(void *arg)
+{
+    int n;
+    struct thread_param *param;
+    struct thread_entity *thread;
+    struct reactor *reactor;
+    struct ebt_srv *srv;
+    struct ev *ev;
+
+    param = (struct thread_param *) arg;
+    n     = param->id;
+    srv   = param->data;
+
+    reactor = ebt_srv_get_reactor(srv, n);
+    reactor->base = ebt_new(E_READ | E_WRITE);
+
+    thread = ebt_srv_get_thread(srv, reactor_pool, n);
+
+    ev = ev_read(thread->notify_recv_fd, ebt_srv_nofitify, srv);
+
+    ev_attach(ebt, ev);
+    ebt_loop(reactor->base);
+    ebt_free(reactor->base);
+
+    return NULL;
+}
+
+static int ebt_srv_poll_start(struct ebt_srv *srv)
+{
+    int i;
+    int size = srv->settings.num_reactors;
+
+    for (i = 0; i < size; i++)
+    {
+        //TODO:
+    }
+    thread_pool_run(srv->reactor_pool, ebt_srv_poll_routine);
+
+    return 0;
+}
+
+static void ebt_srv_poll_event_process(short num, struct ebt_srv *srv)
+{
+    int fd = num;
+    int n;
+    struct factory *factory;
+    struct EventData edata;
+
+    n = ebt_srv_read(fd, edata.data, sizeof(edata.data));
+
+    if (n < 0)
+        return;
+    else if (n == 0)
+        ebt_srv_close();
+    else
+    {
+        
+    }
+}
 
 static int ebt_srv_factory_start(struct factory *factory);
 static int ebt_srv_factory_routine(struct factory *factory);
@@ -1765,6 +1876,7 @@ static void ebt_srv_accept(short sfd, struct ebt_srv *srv)
     n = new_fd % srv->settings.num_reactors;
     reactor = ebt_srv_get_reactor(srv, n);
 
+    //将new_fd添加到子反应堆
     ev = ev_read(new_fd, void(*)(short, void *) ebt_srv_poll_event_process, srv);
     r  = ev_attach(reactor->ebt, ev);
 
@@ -1863,7 +1975,7 @@ int ebt_srv_start(struct ebt_srv *srv)
     struct timeval tv;
     struct eb_t *mbase;
     struct ev *ev[2];
-    int i, r, sfd;
+    int r = 0, sfd;
 
     //作为守护进程
     if (srv->settings.daemonize > 0)
@@ -1897,7 +2009,9 @@ int ebt_srv_start(struct ebt_srv *srv)
     ev_attach(mbase, ev[0]);
     ev_attach(mbase, ev[1]);
 
-    edata = {sfd, 0, 0, mbase.reactor_id, {0}};
+    edata.fd = sfd;
+    edata.from_reactor_id = mbase.reactor_id;
+    edata.type = E_STARTED;
 
     if (srv->handles[E_START] != NULL)
     {
@@ -1908,7 +2022,8 @@ int ebt_srv_start(struct ebt_srv *srv)
 
     if (srv->handles[E_SHUTDOWN] != NULL)
     {
-        srv->handles[E_SHUTDOWN](edata);
+        edata.type = E_SHUTDOWNED;
+        srv->handles[E_SHUTDOWN](&edata);
     }
 
     return 0;
