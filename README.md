@@ -3,10 +3,10 @@ Libebt是一个轻量级异步网络库, 可以用于构建小型高性能的网
 
 ###安装/使用
 
-1.环境要求
+1.环境要求 
 Libebt目前只支持Linux环境上使用，而且它的异步事件操作用使了linux的epoll操作， 所以需要linux内核2.6以上。
 
-2.安装
+2.安装 
 下载源码包，切换源码目录：`make`。
 
 ###异步IO
@@ -26,7 +26,9 @@ void main(void)
 
 	struct eb_t ebt = ebt_new(E_READ | E_WRITE | E_TIMER);
 
+    //IO事件
 	struct ev *ev_io = ev_read(0, cb, buf);
+    //定时器
 	struct ev *ev_t = ev_timer(&tv, tcb, buf);
 
 	ev_attach(ebt, ev_io);
