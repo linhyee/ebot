@@ -1547,15 +1547,15 @@ void ebt_free(struct eb_t *ebt)
 /******************************************************************/
 /* network                                                        */
 /******************************************************************/
-enum e_type
+enum r_type
 {
-    E_START     = 0,
-    E_CONNECT   = 1,
-    E_RECEIVE   = 2,
-    E_TIMER     = 3
-    E_CLOSE     = 4,
-    E_SHUTDOWN  = 5,
-    E_ERROR     = 6
+    E_START    = 0,
+    E_CONNECT  = 1,
+    E_RECEIVE  = 2,
+    E_TIMEOUT  = 3,
+    E_CLOSE    = 4,
+    E_SHUTDOWN = 5,
+    E_ERROR    = 6
 };
 
 enum s_type
@@ -1605,7 +1605,7 @@ struct sa
 struct reactor
 {
     struct eb_t        *base;
-    struct factory     *factory
+    struct factory     *factory;
     void               *ptr;
     int                 reactor_id;
     int                 status; 
@@ -1657,6 +1657,7 @@ struct ebt_srv
     struct master_reactor   mreactor;           //主反应堆
     struct thread_pool      reactor_pool;       //子反应堆线程池
     struct thread_pool      factory_pool;       //任务调度线程池
+    struct sa               sa;                 //
     int                     pipe[2];            //通信管道
     int                     sfd;                //服务器套接字
     e_handle_t              handles[E_MAX_ETYPE];//注册到服务对象的回调 
@@ -1665,7 +1666,7 @@ struct ebt_srv
 #define ebt_srv_get_thread(srv, w, n)   (srv->w.threads[n])
 #define ebt_srv_get_param(srv, w, n)    (srv->w.params[n])
 #define ebt_srv_get_reactor(srv, n)     (struct reactor *) ebt_srv_get_thread(srv, reactor_pool, n).data.ptr
-#define ebt_srv_get_factory(srv, n)     (struct factory *) ebt_srv_get_reactor(srv, factory_pool, n).data.ptr
+#define ebt_srv_get_factory(srv, n)     (struct factory *) ebt_srv_get_thread(srv, factory_pool, n).data.ptr
 
 static int ebt_srv_write(int fd, char *buf, int len)
 {
@@ -1706,7 +1707,7 @@ static ebt_srv_read(int fd, char *buf, int len)
         nread = read(fd, buf + n, len -n);
         if (nread < 0)
         {
-            if (errno == EINTR) continue
+            if (errno == EINTR) continue;
             break;
         }
         else if (nread == 0)
@@ -1740,9 +1741,9 @@ ebt_srv_reactors_init(struct ebt_srv *srv)
 {
     int i;
     int size = srv->settings.num_reactors;
-    struct child_reactor *reactors;
+    struct reactor *reactors;
 
-    reactors = calloc(size, sizeof * reactors);
+    reactors = calloc(size, sizeof (struct child_reactor));
 
     if (reactors == NULL)
     {
@@ -1789,7 +1790,7 @@ ebt_srv_factories_init(struct ebt_srv *srv)
     {
         struct factory *factory = ebt_srv_get_factory(srv, i);
 
-        factory = factories[i];
+        factory = &factories[i];
         factory->factory_id = i;
         factory->ptr = srv;
         factory->task = srv->handles[E_RECEIVE];
@@ -1798,6 +1799,9 @@ ebt_srv_factories_init(struct ebt_srv *srv)
 
     return 0;
 }
+static void ebt_srv_event_nofitify(short num , struct ebt_srv *srv);
+static void ebt_srv_event_close(short num, struct ebt_srv *srv);
+static void ebt_srv_close();
 
 static void* ebt_srv_poll_routine(void *arg)
 {
@@ -1815,11 +1819,11 @@ static void* ebt_srv_poll_routine(void *arg)
     reactor = ebt_srv_get_reactor(srv, n);
     reactor->base = ebt_new(E_READ | E_WRITE);
 
-    thread = ebt_srv_get_thread(srv, reactor_pool, n);
+    thread = &ebt_srv_get_thread(srv, reactor_pool, n);
 
-    ev = ev_read(thread->notify_recv_fd, ebt_srv_nofitify, srv);
+    ev = ev_read(thread->notify_recv_fd, (void (*)(short, void*)) ebt_srv_event_nofitify, srv);
 
-    ev_attach(ebt, ev);
+    ev_attach(ev, reactor->base);
     ebt_loop(reactor->base);
     ebt_free(reactor->base);
 
@@ -1835,7 +1839,7 @@ static int ebt_srv_poll_start(struct ebt_srv *srv)
     {
         //TODO:
     }
-    thread_pool_run(srv->reactor_pool, ebt_srv_poll_routine);
+    thread_pool_run(&srv->reactor_pool, ebt_srv_poll_routine);
 
     return 0;
 }
@@ -1859,38 +1863,49 @@ static void ebt_srv_poll_event_process(short num, struct ebt_srv *srv)
     }
 }
 
-static int ebt_srv_factory_start(struct factory *factory);
-static int ebt_srv_factory_routine(struct factory *factory);
-static int ebt_srv_factory_event_process(short num, struct *factory);
+static int ebt_srv_factory_start(struct ebt_srv *srv);
+static int ebt_srv_factory_routine(struct ebt_srv *srv);
+static void ebt_srv_factory_event_process(short num, struct ebt_srv *srv);
 
 static void ebt_srv_accept(short sfd, struct ebt_srv *srv)
 {
     int r, n, new_fd;
     struct ev *ev; 
+    struct sa sa;
     struct EventData edata;
-    struct child_reactor *reactor;
+    struct reactor *reactor;
 
-    new_fd = accept(sfd, &cli_addr, sizeof(cli_addr));
+    new_fd = accept(sfd, &sa.u.sa, &sa.len);
 
-    //取模散列
-    n = new_fd % srv->settings.num_reactors;
-    reactor = ebt_srv_get_reactor(srv, n);
+    if (new_fd == -1)
+    {
+        err_msg("accept error, error: %s", strerror(errno));
+    }
+    else
+    {
+        set_nonblock(new_fd, 1);
+        srv->sa = sa;
 
-    //将new_fd添加到子反应堆
-    ev = ev_read(new_fd, void(*)(short, void *) ebt_srv_poll_event_process, srv);
-    r  = ev_attach(reactor->ebt, ev);
+        //取模散列
+        n = new_fd % srv->settings.num_reactors;
+        reactor = ebt_srv_get_reactor(srv, n);
 
-    if (r < 0)
-        err_msg("masterThread add event fail [cli_fd=%d] [reactor_id=%d]!", new_fd, reactor->reactor_id)
+        //将new_fd添加到子反应堆
+        ev = ev_read(new_fd, (void(*)(short, void *)) ebt_srv_poll_event_process, srv);
+        r  = ev_attach(ev, reactor->base);
 
-    edata.fd              = new_fd;
-    edata.type            = E_CONNECTED;
-    edata.len             = sizeof(new_fd);
-    edata.from_reactor_id = reactor.reactor_id;
-    edata.data            = "client connected";
+        if (r < 0)
+            err_msg("masterThread add event fail [cli_fd=%d] [reactor_id=%d]!", new_fd, reactor->reactor_id);
 
-    //回调connent方法
-    srv->handles[E_CONNECT](&edata);
+        edata.fd              = new_fd;
+        edata.type            = E_CONNECTED;
+        edata.len             = sizeof(new_fd);
+        edata.from_reactor_id = reactor->reactor_id;
+        strcpy(edata.data, "client connected");
+
+        //回调connent方法
+        srv->handles[E_CONNECT](&edata);
+    }
 }
 
 /**
@@ -1931,6 +1946,7 @@ int ebt_srv_create(struct ebt_srv *srv)
 int ebt_srv_listen(struct ebt_srv *srv, short port)
 {
     int sfd, on =1, af;
+    struct sa sa;
 
 #ifdef WITH_IPV6
     af = PF_INET6;
@@ -1975,7 +1991,7 @@ int ebt_srv_start(struct ebt_srv *srv)
     struct timeval tv;
     struct eb_t *mbase;
     struct ev *ev[2];
-    int r = 0, sfd;
+    int r = 0;
 
     //作为守护进程
     if (srv->settings.daemonize > 0)
@@ -1988,7 +2004,7 @@ int ebt_srv_start(struct ebt_srv *srv)
     if (r < 0)
         err_exit("reactor threads start polling fail.");
 
-    r = ebt_srv_factory_start(&srv->factory_pool);
+    r = ebt_srv_factory_start(srv);
     if (r < 0)
         err_exit("factory threads start working fail.");
 
@@ -1996,21 +2012,21 @@ int ebt_srv_start(struct ebt_srv *srv)
     if (mbase == NULL)
         err_exit("can't create master reactor for master thread.");
 
-    srv->mreactor.base = mbase;
-    srv->mreactor.base.reactor_id = E_MASTER_REACTOR; //标记为主master反应堆
+    srv->mreactor.reactor.base = mbase;
+    srv->mreactor.reactor.reactor_id = E_MASTER_REACTOR; //标记为主master反应堆
     srv->mreactor.thread_id = pthread_self();
 
     if (srv->sfd <= 0)
         return -1;
 
-    ev[0] = ev_read(sfd, void(*)(short, void*) ebt_srv_accept, srv);
-    ev[1] = ev_read(srv->pipe[0], void(*)(short, void*) ebt_srv_close, srv);
+    ev[0] = ev_read(srv->sfd, (void(*)(short, void*)) ebt_srv_accept, srv);
+    ev[1] = ev_read(srv->pipe[0], (void(*)(short, void*)) ebt_srv_event_close, srv);
 
-    ev_attach(mbase, ev[0]);
-    ev_attach(mbase, ev[1]);
+    ev_attach(ev[0], mbase);
+    ev_attach(ev[1], mbase);
 
-    edata.fd = sfd;
-    edata.from_reactor_id = mbase.reactor_id;
+    edata.fd = srv->sfd;
+    edata.from_reactor_id = E_MASTER_REACTOR; 
     edata.type = E_STARTED;
 
     if (srv->handles[E_START] != NULL)
@@ -2018,7 +2034,7 @@ int ebt_srv_start(struct ebt_srv *srv)
         srv->handles[E_START](&edata);
     }
 
-    ebt_loop(ebt);
+    ebt_loop(mbase);
 
     if (srv->handles[E_SHUTDOWN] != NULL)
     {
@@ -2029,7 +2045,7 @@ int ebt_srv_start(struct ebt_srv *srv)
     return 0;
 }
 
-int ebt_srv_on(struct ebt_srv *srv, enum e_type type, e_handle_t cb)
+int ebt_srv_on(struct ebt_srv *srv, enum r_type type, e_handle_t cb)
 {
     if (type >= E_MAX_ETYPE)
         return -1;
@@ -2557,6 +2573,11 @@ int main(int argc, char *argv[])
 
     thread_pool_free(&pool);
 #endif
+
+    int on_connect(struct EventData *);
+    int on_receive(struct EventData *);
+    int on_close(struct EventData *);
+    int on_shutdown(struct EventData *);
 
     struct ebt_srv srv; 
     ebt_srv_create(&srv);
