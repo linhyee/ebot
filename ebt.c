@@ -99,6 +99,11 @@ static void err_doit(int errnoflag, const char *fmt, va_list ap)
 #define err_debug(fmt, ...) err_msg(fmt, ## __VA_ARGS__)
 #else
 #define err_debug(fmt, ...)
+#define err_exit(fmt, ...)  do {  \
+    err_msg(fmt, ##__VA_ARGS__);  \
+    exit(1);                      \
+} while(0)
+
 #endif
 
 /******************************************************************/
@@ -512,6 +517,47 @@ int thread_pool_init(struct thread_pool *pool, int num_threads)
     pool->shutdown = 1;
 
     return 0;
+}
+
+static void *thread_route(void *arg)
+{
+    pthread_t thread_id        = pthread_self();
+    struct thread_param *param = (struct thread_param *) arg;
+    struct thread_pool *pool   = param->data;
+    int ret;
+
+    err_msg("thread [%d] is starting to work", thread_id);
+
+    while(1)
+    {
+        pthread_mutex_lock(&pool->mutex);
+
+        if (pool->shutdown)
+        {
+            pthread_mutex_unlock(&pool->mutex);
+            err_msg("thread[%d] will exit", (int)pool->threads[param->id].thread_id);
+            pthread_exit(NULL);
+        }
+
+        if (pool->num_tasks == 0)
+            pthread_cond_wait(&pool->cond, &pool->mutex);
+
+        // ret = cqueue_shift(pool->cq, &tm_bz, sizeof (struct item_bz));
+
+        pthread_mutex_unlock(&pool->mutex);
+
+        if (ret >= 0)
+        {
+            _u32_t *num_tasks = &pool->num_tasks;
+            atom_sub(num_tasks, 1);
+
+            //TODO: 这里调用工作函数
+            //pool->task();
+        }
+    }
+
+    pthread_exit(NULL);
+    return NULL;
 }
 
 void thread_pool_run(struct thread_pool *pool, void *(*func)(void *))
@@ -1467,7 +1513,7 @@ struct eb_t * ebt_new(enum e_kide kides)
     struct eb_t *ebt;
     const struct eb_o **ebo;
 
-    /* 寻找对应支持事伯的操作实例 */
+    /* 寻找对应支持事件的操作实例 */
     for (ebo = ebo_map; *ebo; ebo++)
     {
         if ((((*ebo)->kides | E_TIMER | E_FLAG) & kides ) != kides)
@@ -1799,9 +1845,20 @@ ebt_srv_factories_init(struct ebt_srv *srv)
 
     return 0;
 }
-static void ebt_srv_event_nofitify(short num , struct ebt_srv *srv);
-static void ebt_srv_event_close(short num, struct ebt_srv *srv);
-static void ebt_srv_close();
+static void ebt_srv_event_nofitify(short num , struct ebt_srv *srv)
+{
+
+}
+
+static void ebt_srv_event_close(short num, struct ebt_srv *srv)
+{
+
+}
+
+static void ebt_srv_close()
+{
+
+}
 
 static void* ebt_srv_poll_routine(void *arg)
 {
@@ -1863,9 +1920,20 @@ static void ebt_srv_poll_event_process(short num, struct ebt_srv *srv)
     }
 }
 
-static int ebt_srv_factory_start(struct ebt_srv *srv);
-static int ebt_srv_factory_routine(struct ebt_srv *srv);
-static void ebt_srv_factory_event_process(short num, struct ebt_srv *srv);
+static int ebt_srv_factory_start(struct ebt_srv *srv)
+{
+    return 0;
+}
+
+static void* ebt_srv_factory_routine(struct ebt_srv *srv)
+{
+    return NULL;
+}
+
+static void ebt_srv_factory_event_process(short num, struct ebt_srv *srv)
+{
+
+}
 
 static void ebt_srv_accept(short sfd, struct ebt_srv *srv)
 {
@@ -2060,520 +2128,48 @@ void ebt_srv_free(struct ebt_srv *srv)
     
 }
 
-/******************************************************************/
-/* test                                                           */
-/******************************************************************/
-struct ev_param 
+//////////////////////TEST//////////////////
+void printEbtsrv(struct ebt_srv *srv)
 {
-    char buf[256];
-    struct timeval tv;
-};
+    int i;
+    printf("\r\n");
 
-struct item_bz
-{
-    char buf[128];
-    int a;
-    struct item_bz *next;
-};
+    err_msg("############ server informations ##############");
+    err_msg("-----------------------------------------------");
+    err_msg("settings.backlog = %d", srv->settings.backlog);
+    err_msg("settings.daemonize = %d", srv->settings.daemonize);
+    err_msg("settings.num_reactors = %d", srv->settings.num_reactors);
+    err_msg("settings.num_factories = %d", srv->settings.num_factories);
+    err_msg("settings.sock_srv_bufsize = %d", srv->settings.max_conn);
+    err_msg("settings.max_request =  %d", srv->settings.max_request);
+    err_msg("settings.timeout_sec = %d", srv->settings.timeout_sec);
+    err_msg("settings.timeout_usec = %d", srv->settings.timeout_usec);
+    err_msg(" ");
+    err_msg("mreactor.reactor.base = %p", srv->mreactor.reactor.base);
+    err_msg("-----------------------------------------------");
+    printf("\r\n");
 
-void cb (short num, void *arg)
-{
-    err_msg("cb is runnig: [fd=%d] [ev_io=%p]", num, arg);
-}
+    printf("\r\n");
+    err_msg("############ factory informations ##############");
+    err_msg("-----------------------------------------------");
 
-void tcb(short num, void *arg)
-{
-
-    // struct ev_timer *evt = (struct ev_timer *) arg;
-    // err_msg("tcb was invoke: [tv.tv_sec=%d] [tv.tv_usec=%d] [ev_timer=%p]", evt->remain.tv_sec, evt->remain.tv_usec, arg);
-    // err_msg("tcb arg: [arg=%s]", (char *)(arg));
-
-    struct ev_param *evp = (struct ev_param *) arg;
-    err_msg("tcb was invoke: [ev_param=%p] [tv.tv_sec=%d] [tv.tv_usec=%d] [buf=%s]", arg, evp->tv.tv_sec, evp->tv.tv_usec, evp->buf);
-
-    err_msg("tcb was invoke: [num=%d]", num);
-}
-
-void tcb1(short num, void *arg)
-{
-    err_msg("tcb1 was invoked: [num=%d]", num);
-}
-
-void fcb(short num, void *arg)
-{
-    err_msg("fcb was invoke: [num=%d] [arg=%p]", num, arg);
-}
-
-void printEbt(struct eb_t *ebt)
-{
-    printf("\n\n\n");
-
-    struct ebt_epoll *epo = (struct ebt_epoll *) ebt;   
-    err_msg("ebt -> epo info: [epo=%p] [ebo=%p] [kides=%x] [timer_tree=%p] [dispatchq=%p] [flags=%p]", epo, ebt->ebo, ebt->kides, &ebt->timers, &ebt->dispatchq, &ebt->flags);
-
-    //print dispatchq
-    if(TAILQ_EMPTY(&ebt->dispatchq))
-        err_msg("dispatchq: it's empty!");
-    else
+    err_msg("reactor thread info: [%p]threads[adr=%p] params[adr=%p]",&srv->reactor_pool, srv->reactor_pool.threads, srv->reactor_pool.params);
+    struct thread_entity *thread;
+    struct thread_param *param;
+    for (i=0; i < srv->reactor_pool.num_threads; i++)
     {
-        struct ev *e;
-        TAILQ_FOREACH(e, &ebt->dispatchq, dispatchq)
-        {
-            err_msg("dispatchq item: [adr=%p] [kide=%x] [opt=%x]", e, e->kide, e->opt);
-        }
+        thread = & ebt_srv_get_thread(srv, reactor_pool, i);
+        param = & ebt_srv_get_param(srv, reactor_pool, i);
+        err_msg("thread info:[adr=%p] [adr=%p] [pos=%d] [id=%d] [paramdata=%p]", thread, param, i, thread->id, param->data);
     }
 
-    //print readev
-    int i, numq = 0;
-    struct ev_io *evi;
-    for (i = 0; i < epo->epsz; i++)
-    {
-        if (epo->readev[i] != NULL)
-        {
-            evi = (struct ev_io *) epo->readev[i];
-            err_msg("readev item: [adr=%p] [fd=%d] [pos=%d]", evi, evi->fd, i);
-        }
-    }
-    //print writev
-    for (i = 0; i < epo->epsz; i++)
-    {
-        if (epo->writev[i] != NULL)
-        {
-            evi = (struct ev_io *) epo->writev[i];
-            err_msg("writev item: [ard=%p] [fd=%d] [pos=%d]", evi, evi->fd, i);
-        }
-    }
+    err_msg("-----------------------------------------------");
+    printf("\n");
 
-    //print timer tree info
-    if (RB_EMPTY(&ebt->timers))
-        err_msg("timer tree: it's empty!");
-    else
-    {
-        struct ev_timer *evt;
-        RB_FOREACH(evt, timer_tree, &ebt->timers)
-        {
-            err_msg("timer tree item: [adr=%p] [remain.tv_sec=%d] [remain.tv_usec=%d]", evt, evt->remain.tv_sec, evt->remain.tv_usec);  
-        }
-    }
-
-    //print flags queue info
-    if (TAILQ_EMPTY(&ebt->flags))
-        err_msg("flagsq: it's empty!");
-    else
-    {
-        struct ev_flag *e;
-        TAILQ_FOREACH(e, &ebt->flags, flags)
-        {
-            err_msg("flagsq item: [adr=%p] [flag=%d]", e, e->flag);
-        }
-    }
-
-    err_msg("ebt total ev nums: [num=%d]", ebt->num);
-    err_msg("ebt total timer nums: [numtimers=%d]", ebt->numtimers);
-    err_msg("ebt total dispatchq nums: [nums=%d]", numq);
-
-    printf("\n\n\n");
-}
-
-void *thread_route(void *arg)
-{
-    pthread_t thread_id = pthread_self();
-    struct thread_param *param = (struct thread_param *) arg;
-    struct thread_pool *pool = param->data;
-    struct item_bz tm_bz;
-    int ret;
-
-    err_msg("thread [%d] is starting to work", thread_id);
-
-    while(1)
-    {
-        pthread_mutex_lock(&pool->mutex);
-
-        if (pool->shutdown)
-        {
-            pthread_mutex_unlock(&pool->mutex);
-            err_msg("thread[%d] will exit", (int)pool->threads[param->id].thread_id);
-            pthread_exit(NULL);
-        }
-
-        if (pool->num_tasks == 0)
-            pthread_cond_wait(&pool->cond, &pool->mutex);
-
-        ret = cqueue_shift(pool->cq, &tm_bz, sizeof (struct item_bz));
-
-        pthread_mutex_unlock(&pool->mutex);
-
-        if (ret >= 0)
-        {
-            _u32_t *num_tasks = &pool->num_tasks;
-            atom_sub(num_tasks, 1);
-
-            err_msg("thread[%d] work on task: [id=%d] [buf=%s]", (int)pool->threads[param->id].thread_id, tm_bz.a, tm_bz.buf);
-        }
-    }
-
-    pthread_exit(NULL);
-    return NULL;
 }
 
 int main(int argc, char *argv[])
 {
-    struct eb_t ebt;
-    struct ev_timer *evt;
-
-    evt = malloc (10 * sizeof (*evt));
-
-    if (evt == NULL)
-        err_msg("malloc failed");
-
-    srand((unsigned)time(NULL));
-    int i, num;
-    for (i = 0; i < 10; i++)
-    {
-        num = rand() % 11;
-        memset(&evt[i].event, 0, sizeof (struct ev));
-        evt[i].event.kide     = E_TIMER;
-        evt[i].event.ebt      = &ebt;
-        evt[i].remain.tv_sec  = num;
-        evt[i].remain.tv_usec = 0;
-    }
-
-    ebt.numtimers = 0;
-    RB_INIT(&ebt.timers);
-
-    for (i =0; i < 10; i++)
-    {
-        err_msg("ev_timer: [adr=%p] [kide=%x] [tv_sec=%d] [tv_usec=%d]", &evt[i], evt[i].event.kide, evt[i].remain.tv_sec, evt[i].remain.tv_usec);
-        timer_insert(&ebt, &evt[i]);
-    }
-
-    printf("\n");
-
-    struct ev_timer *ev_t;
-    RB_FOREACH(ev_t, timer_tree, &ebt.timers)
-    {
-        err_msg("ev_timer: [adr=%p] [kide=%x] [tv_sec=%d] [tv_usec=%d]", ev_t, ev_t->event.kide, ev_t->remain.tv_sec, ev_t->remain.tv_usec);
-    }
-
-    printf ("\n");
-    err_msg("current total timers [numtimers=%d]", ebt.numtimers);
-    printf ("\n");
-
-    struct ev_timer *tmp = &evt[3];
-    timer_remove(&ebt, tmp);
-
-    tmp = &evt[4];
-    tmp->remain.tv_sec  = 14;
-    tmp->remain.tv_usec = 0;
-    timer_reset(tmp);
-
-    ev_t = NULL;
-    RB_FOREACH(ev_t, timer_tree, &ebt.timers)
-    {
-        err_msg("ev_timer: [adr=%p] [kide=%x] [tv_sec=%d] [tv_usec=%d]", ev_t, ev_t->event.kide, ev_t->remain.tv_sec, ev_t->remain.tv_usec);
-    }
-
-    printf ("\n");
-    err_msg("current total timers [numtimers=%d]", ebt.numtimers);
-    printf ("\n");
-
-    free(evt);
-
-
-    struct eb_t *eb = ebt_new(E_READ|E_WRITE);
-
-    for (i = 0; i < 10; i++)
-    {
-        struct ev *io = ev_read(i, cb, io);
-        io->ebt = eb;   
-        eventq_in(io);
-        err_msg("add to q: [fd=%d] [evi=%p]", i, io);
-    }
-
-    printf("\n");
-
-    //print io
-    struct ev *e = NULL;
-    TAILQ_FOREACH(e, &eb->dispatchq, dispatchq)
-    {
-        struct ev_io *evi = (struct ev_io *) e;
-
-        e->cb(evi->fd, evi);    
-    }
-
-    printf("\n");
-
-    //release io
-    while (e = TAILQ_FIRST(&eb->dispatchq))
-    {
-        TAILQ_REMOVE(&eb->dispatchq, e, dispatchq);
-
-        struct ev_io *evi = (struct ev_io *) e;
-        err_msg("remove fd event: [fd=%d]", evi->fd);
-
-        if (evi)
-            free(evi);
-    }
-
-    ebt_free(eb);
-
-
-    printf ("\n\n");
-
-    struct ev *t1, *t2, *t3, *t4;
-    char *buf ="###__---%%%%||||bbbbbbbbbb";
-    int j, k, ret;
-
-    struct eb_t *nebt = ebt_new(E_READ | E_WRITE | E_TIMER | E_FLAG);
-    struct timeval tv;
-    printEbt(nebt);
-
-    //test timer
-    struct ev *et;
-    for (j = 0; j < 10; j++)
-    {
-        tv.tv_sec     = rand() % 15 + 5;
-        tv.tv_usec    = 0;
-        struct ev *et = ev_timer(&tv, tcb1, &tv);
-        ret           = ev_attach(et, nebt);
-
-        //手动入队测试
-        eventq_in(et);
-
-        //保存第5个
-        if (j == 4)
-            t1 = et;
-    }
-
-    //test io fd
-    struct ev *ef;
-
-    // ef = ev_write(0, fcb, buf);
-    // ef->kide |= E_READ;
-    // ret = ev_attach(ef, nebt);
-
-    for (j = 0; j < 10; j++)
-    {
-        ef  = ev_write(j, fcb, buf);
-        ret = ev_attach(ef, nebt);
-
-        if (j == 0)
-            t4 = ef;
-    }
-
-    for (j = 0; j < 10; j++)
-    {
-        ef  = ev_read(j, fcb, buf);
-        ret = ev_attach(ef, nebt);
-
-        if (j == 0)
-            t3 = ef;
-    }
-
-    //test flag
-    struct ev *evf;
-    for (j = 0; j < 10; j++)
-    {
-        evf = ev_flag(j + 1, fcb, buf);
-        ret = ev_attach(evf, nebt);
-
-        if (j == 2)
-            t2 = evf;
-    }
-
-    printEbt(nebt); 
-
-    ev_detach(t1, nebt);
-    ev_detach(t2, nebt);
-    ev_detach(t3, nebt);
-    ev_detach(t4, nebt);
-
-    dispatch_queue(nebt);
-
-    printEbt(nebt);
-
-    err_msg("ret =%d errno=%d errstr=%s", ret, errno, strerror(errno));
-
-    ebt_free(nebt);
-
-
-
-    // // test event loop
-    // struct eb_t *ebt1 = ebt_new(E_READ | E_WRITE | E_TIMER);
-
-    // for (j = 0; j < 10; j++)
-    // {
-    //  struct ev_param *dt = calloc(1, sizeof(struct ev_param));
-    //  memcpy(dt->buf, buf, strlen(buf) + 1);
-    //  tv.tv_sec     = rand() % 15 + 5;
-    //  tv.tv_usec    = 0;
-    //  dt->tv        = tv;
-
-    //  struct ev *et = ev_timer(&tv, tcb, dt);
-    //  ret           = ev_attach(et, ebt1);
-    // }
-
-    // printEbt(ebt1);
-
-    // ebt_loop(ebt1);
-
-    // printEbt(ebt1);
-
-    // ebt_free(ebt1);
-
-
-    struct cqueue *cq = cqueue_new(1024 * 128, 512, 0);
-
-    printCqueue(cq);
-
-    struct item_bz bz = {"BB|||-----HELC%%%%", 1, &bz};
-    char bf[256] = "%%||@$$$$___|||@#FEWCCCsabss%%";
-    int a = 128;
-
-    cqueue_unshift(cq, &bz, sizeof(struct item_bz));
-    cqueue_unshift(cq, bf, 256);
-    cqueue_unshift(cq, &a, sizeof(a));
-
-    printCqueue(cq);
-
-    struct item_bz az;
-    int af[256];
-    int b;
-
-    cqueue_shift(cq, &az, sizeof(struct item_bz));
-    err_msg("item_bz:[buf=%s] [a=%d] [next=%p]", az.buf, az.a, az.next);
-
-    cqueue_shift(cq, af, 256);
-    err_msg("af: [af=%s]", af);
-
-    cqueue_shift(cq, &b, sizeof(b));
-    err_msg("b: [b=%d]", b);
-
-    printCqueue(cq);
-
-
-    int s;
-    for (s = 0; s < 10; s++)
-    {
-        struct item_bz ibz = {"bbbb||||-------------%%%%%%+++++++$$", rand() % 10, &ibz};
-        cqueue_unshift(cq, &ibz, sizeof(struct item_bz));
-    }
-
-    printCqueue(cq);
-
-    while (!cqueue_empty(cq))
-    {
-        struct item_bz tmp_bz;
-        cqueue_shift(cq, &tmp_bz, sizeof(struct item_bz));
-        err_msg("item_bz:[buf=%s] [a=%d] [next=%p]", tmp_bz.buf, tmp_bz.a, tmp_bz.next);
-    }
-
-    printCqueue(cq);
-
-    cqueue_free(cq);
-
-    printf("\n\n");
-
-#if 0
-    cq = cqueue_new(1024 * 80, 1000, QF_NOTIFY | QF_LOCK | QF_SHM);
-
-    printCqueue(cq);
-
-    pid_t pid;
-    int z, worker_num = 5;
-    for (z = 0; z < worker_num; z++)
-    {
-        if ((pid = fork()) < 0)
-        {
-            err_msg("fork");
-            exit(1);
-        }
-        else if (pid > 0)
-        {
-            err_msg("created child process success. [pid = %d]", (int)pid);
-            continue;
-        }
-        else
-        {
-            //child process
-            int recvn = 0;
-            struct item_bz tm_bz;
-            char fname[56];
-            char mbuff[256];
-            FILE *fp;
-
-            sprintf(fname, "/root/src/log_%d.txt", z);
-            fp = fopen(fname, "a+");
-
-            while (1)
-            {
-                if (cqueue_wait(cq) > 0)
-                {
-                    if (cqueue_pop(cq, &tm_bz, sizeof(struct item_bz)) < 0)
-                        continue;
-                    recvn++;
-
-                    err_msg("worker[%d] recv: [buf=%s] [rand=%d]", z, tm_bz.buf, tm_bz.a);
-                    sprintf(mbuff, "worker[%d] recv: [buf=%s] [rand=%d]\n", z, tm_bz.buf, tm_bz.a);
-
-                    //write log to file[i];
-                    fputs(mbuff, fp);
-                }
-            }
-            err_msg("worker[%d] finish: [recvn=%d]", z, recvn);
-            fclose(fp);
-            exit(0);
-        }
-    }
-
-    label: sleep(1);
-
-    int sendn = 0;
-    int inum = 10000;
-    while (inum > 0)
-    {
-        struct item_bz ibz = {"--||||||||mmmmmm$$########", rand() % 11, &ibz};
-        if (cqueue_push(cq, &ibz, sizeof (struct item_bz)) == 0)
-        {
-            cqueue_notify(cq);
-            sendn++;
-            inum--;
-        }
-    }
-
-    printCqueue(cq);
-
-    err_msg("master send finish: [num=%d] [sendn=%d]", inum, sendn);
-    int status;
-    for (z = 0; z < worker_num; z++)
-    {
-        wait(&status);
-    }
-
-    cqueue_free(cq);
-#endif
-
-#if 0 
-    int iput;
-    int num_tasks = 1000;
-    int num_threads = 4;
-
-    struct thread_pool pool;
-    thread_pool_init(&pool, num_threads);
-
-    thread_pool_run(&pool, thread_route);
-
-    main_loop: sleep(2);
-    //分发任务
-    for (iput = 0; iput < num_tasks; iput++)
-    {
-        struct item_bz jobz = {"--|||||||||||nnnnnn%%%%%%;;;;;", rand() % 128, &jobz};
-        thread_pool_dispatchq(&pool, &jobz, sizeof(struct item_bz));
-    }
-
-    thread_pool_free(&pool);
-#endif
-
     int on_connect(struct EventData *);
     int on_receive(struct EventData *);
     int on_close(struct EventData *);
@@ -2582,14 +2178,33 @@ int main(int argc, char *argv[])
     struct ebt_srv srv; 
     ebt_srv_create(&srv);
 
+    printEbtsrv(&srv);
+
     ebt_srv_on(&srv, E_CONNECT, on_connect);
     ebt_srv_on(&srv, E_RECEIVE, on_receive);
     ebt_srv_on(&srv, E_CLOSE, on_close);
     ebt_srv_on(&srv, E_SHUTDOWN, on_shutdown);
 
-    ebt_srv_listen(&srv, 8080);
-    ebt_srv_start(&srv);
+    // ebt_srv_listen(&srv, 8080);
+    // ebt_srv_start(&srv);
 
     ebt_srv_free(&srv);
     return 0;   
+}
+
+int on_connect(struct EventData *data)
+{
+    return 0;
+}
+int on_receive(struct EventData *data)
+{
+    return 0;
+}
+int on_close(struct EventData *data)
+{
+    return 0;
+}
+int on_shutdown(struct EventData *data)
+{
+   return 0; 
 }
