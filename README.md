@@ -18,7 +18,7 @@ Libebt目前只支持Linux环境上使用，而且它的异步事件操作用使
 #include <sys/time.h>
 #include <ebt.h>
 
-void main(void)
+int main(void)
 {
 	struct timeval tv = {5, 0};
 	char buf[128] = "hello, world!";
@@ -39,6 +39,8 @@ void main(void)
 	ebt_loop(ebt);
 
 	ebt_free(ebt);
+
+	return 0;
 }
 
 void cb(short num, void *arg)
