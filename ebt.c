@@ -1362,7 +1362,7 @@ static void dispatch_queue(struct eb_t *ebt)
         {
             /* 从队列移除 */
             TAILQ_REMOVE(&ebt->dispatchq, e, dispatchq);
-            e->opt &= ~E_QUEUE;
+            e->opt &= ~E_QUEUE; //这里有一点问题, 如果flag事件不是E_ONCE类型的话, 会无限激活, 无限加入dispatchq队列
             
             switch (e->kide)
             {
