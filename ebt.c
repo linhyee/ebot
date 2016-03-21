@@ -1095,6 +1095,11 @@ void ev_init(struct ev *e, enum e_kide kide, e_cb_t *cb, void *arg)
     e->arg  = arg;  
 }
 
+void ev_opt(struct ev *e, enum e_opt opt)
+{
+    e->opt |= opt;
+}
+
 struct ev * ev_read(int fd, e_cb_t *cb, void *arg)
 {
     struct ev_io *event;    
@@ -1288,11 +1293,7 @@ static int wait_for_events(struct eb_t *ebt, const struct timeval *start, struct
     /* 如果存在用户自定义事件, 也放到dispatchq队列 */
     TAILQ_FOREACH(evf, &ebt->flags, flags)  
     {
-        if (evf->flag)
-        {
-            if (eventq_in((struct ev *) evf) == 0)
-                err_debug("flag events in dispatchq: [ev=%p] [flag=%d]", evf, evf->flag);
-        }
+        eventq_in((struct ev *) evf);
     }
 
     //确保队列中所有事件都dispatch完毕
@@ -1333,9 +1334,7 @@ static int wait_for_events(struct eb_t *ebt, const struct timeval *start, struct
 
         if (timer->remain.tv_sec < 0 || (timer->remain.tv_sec == 0 && timer->remain.tv_usec <= 0))
         {
-            if (eventq_in((struct ev *) timer) == 0)
-                err_debug("timer event in dispatchq: [timer=%p] [tv.tv_sec=%d] [tv.tv_usec=%d]", 
-                    timer, timer->tv.tv_sec, timer->tv.tv_usec);
+            eventq_in((struct ev *) timer);
         }
     }
 
@@ -1381,7 +1380,7 @@ static void dispatch_queue(struct eb_t *ebt)
             opt = e->opt;
             e->opt &= ~ E_FREE; //这里移除FREE标记, 先将事件从队列踢出, 但不会即释放其空间, 不然无法回调cb函数
             if (e->opt & E_ONCE)
-                ev_detach(e);
+                ev_detach(e, ebt);
 
             /* 调用事件处理函数 */
             if (e != NULL)
@@ -1465,8 +1464,10 @@ int ev_detach(struct ev *e, struct eb_t *ebt)
             break;
 
         case E_FLAG:
+        {
             TAILQ_REMOVE(&ebt->flags, (struct ev_flag *) e, flags);
             break;
+        }
 
         default:
             if (ebt->ebo->detach(ebt, e) < 0)
@@ -2198,6 +2199,12 @@ void fifo_read(short fd, void *arg)
     err_debug("read:%s", buf);
 }
 
+void flag_cb(short flag, void *arg)
+{
+    err_debug("%s called", __func__);
+    err_msg("%x | %p", flag, arg);
+}
+
 int create_fifo(const char *file)
 {
     struct stat st;
@@ -2248,11 +2255,14 @@ int main(int argc, char *argv[])
 
 
     //test ebt
-    struct eb_t *ebt = ebt_new(E_READ | E_WRITE | E_TIMER);
+    struct eb_t *ebt = ebt_new(E_READ | E_WRITE | E_TIMER | E_FLAG);
     int fd = create_fifo("ev.fifo");
-    struct ev *ev = ev_read(fd, fifo_read, ev);
+    struct ev *ev  = ev_read(fd, fifo_read, ev);
+    struct ev *evf = ev_flag(0x0fff, flag_cb, evf);
 
     ev_attach(ev, ebt);
+    ev_opt(evf, E_ONCE);
+    ev_attach(evf, ebt);
 
     printEbt(ebt);
     
