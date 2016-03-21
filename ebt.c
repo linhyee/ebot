@@ -99,12 +99,11 @@ static void err_doit(int errnoflag, const char *fmt, va_list ap)
 #define err_debug(fmt, ...) err_msg(fmt, ## __VA_ARGS__)
 #else
 #define err_debug(fmt, ...)
+#endif
 #define err_exit(fmt, ...)  do {  \
     err_msg(fmt, ##__VA_ARGS__);  \
     exit(1);                      \
 } while(0)
-
-#endif
 
 /******************************************************************/
 /* cqueue                                                         */
@@ -776,7 +775,7 @@ RB_GENERATE(timer_tree, ev_timer, timer_node, compare);
 #ifdef HAVE_SETFD
 #define FD_CLOSEONEXEC(x) do {      \
     if (fcntl(x, F_SETFD, 1) == -1) \
-        err_sys_("fcntl error!");   \
+        err_exit("fcntl error!");   \
 } while(0)
 #else
 #define FD_CLOSEONEXEC(x)
@@ -854,7 +853,7 @@ static int epoll_init(struct eb_t *ebt)
     epo->writev = calloc(EP_SIZE, sizeof (struct ev *));
 
     /* print ebt infomations */
-    err_msg("ebt_epoll: [epfd=%d] [epevents=%p] [epsz=%d] [nfds=%d] [readev=%p] [writev=%p]",
+    err_debug("ebt_epoll: [epfd=%d] [epevents=%p] [epsz=%d] [nfds=%d] [readev=%p] [writev=%p]",
         epo->epfd,
         epo->epevents,
         epo->epsz,
@@ -879,12 +878,17 @@ static int epoll_loop(struct eb_t *ebt, const struct timeval *tv)
     int cnt;    
     int timeout;
 
-    timeout = tv->tv_sec * 1000 + (tv->tv_usec + 999) / 1000;
+    if (tv != NULL)
+        timeout = tv->tv_sec * 1000 + (tv->tv_usec + 999) / 1000;
+    else
+        timeout = 2 *1000;
 
     cnt = epoll_wait(epo->epfd, epo->epevents, epo->epsz, timeout);
 
     if (cnt < 0)
         return errno == EINTR ? 0: -1;
+    else
+        err_debug("errno=%d | errstr=%s", errno, strerror(errno));
 
     epo->nfds = cnt;
 
@@ -1291,7 +1295,8 @@ static int wait_for_events(struct eb_t *ebt, const struct timeval *start, struct
         }
     }
 
-    if (TAILQ_EMPTY(&ebt->dispatchq) && ebt->numtimers == 0)
+    //确保队列中所有事件都dispatch完毕
+    if (!TAILQ_EMPTY(&ebt->dispatchq))
         return 0;
 
     /* 定时器处理 */
@@ -1374,7 +1379,7 @@ static void dispatch_queue(struct eb_t *ebt)
 
             /* 如果是一次性的事件? 立刻移除 */
             opt = e->opt;
-            e->opt &= ~ E_FREE;
+            e->opt &= ~ E_FREE; //这里移除FREE标记, 先将事件从队列踢出, 但不会即释放其空间, 不然无法回调cb函数
             if (e->opt & E_ONCE)
                 ev_detach(e);
 
@@ -1383,7 +1388,7 @@ static void dispatch_queue(struct eb_t *ebt)
                 e->cb(num, e->arg);
 
             /* 如果事件处理函数中, 删除了该事件? */
-            if (!ev_attach(e))
+            if (e->ebt == NULL)
                 return;
 
             /* 如果事件从队列被删除了, 要释放其内存空间? */
@@ -2129,6 +2134,7 @@ void ebt_srv_free(struct ebt_srv *srv)
 }
 
 //////////////////////TEST//////////////////
+#include <sys/stat.h>
 void printEbtsrv(struct ebt_srv *srv)
 {
     int i;
@@ -2168,12 +2174,62 @@ void printEbtsrv(struct ebt_srv *srv)
 
 }
 
+void fifo_read(short fd, void *arg)
+{
+    int len;
+    char buf[255] = {0};
+
+    err_debug("%s called", __func__);
+
+    len = read(fd, buf, sizeof(buf)-1);
+    err_msg("read [errno=%d] [errstr=%s]", errno, strerror(errno));
+
+    if (len == -1)
+    {
+        err_debug("read!");
+        return;
+    }
+    else if (len == 0)
+    {
+        err_debug("connection closed");
+        return;
+    }
+    buf[len] = '\0';
+    err_debug("read:%s", buf);
+}
+
+int create_fifo(const char *file)
+{
+    struct stat st;
+
+    if (lstat(file, &st) == 0)
+    {
+        if ((st.st_mode & S_IFMT) == S_IFREG)
+            err_exit("lstat");
+    }
+    unlink(file);
+
+    if (mkfifo(file, 0600) == -1)
+        err_exit("mkfifo");
+
+    int fd;
+    fd = open(file, O_RDWR | O_NONBLOCK, 0);
+
+    if (fd == -1)
+        err_exit("open");
+
+    err_debug("fifo fd:[%d]", fd);
+
+    return fd;
+}
+
 int main(int argc, char *argv[])
 {
     int on_connect(struct EventData *);
     int on_receive(struct EventData *);
     int on_close(struct EventData *);
     int on_shutdown(struct EventData *);
+    void printEbt(struct eb_t *);
 
     struct ebt_srv srv; 
     ebt_srv_create(&srv);
@@ -2189,6 +2245,20 @@ int main(int argc, char *argv[])
     // ebt_srv_start(&srv);
 
     ebt_srv_free(&srv);
+
+
+    //test ebt
+    struct eb_t *ebt = ebt_new(E_READ | E_WRITE | E_TIMER);
+    int fd = create_fifo("ev.fifo");
+    struct ev *ev = ev_read(fd, fifo_read, ev);
+
+    ev_attach(ev, ebt);
+
+    printEbt(ebt);
+    
+    ebt_loop(ebt);
+    ebt_free(ebt);
+
     return 0;   
 }
 
@@ -2207,4 +2277,75 @@ int on_close(struct EventData *data)
 int on_shutdown(struct EventData *data)
 {
    return 0; 
+}
+
+void printEbt(struct eb_t *ebt)
+{
+    printf("\n\n\n");
+
+    struct ebt_epoll *epo = (struct ebt_epoll *) ebt;   
+    err_msg("ebt -> epo info: [epo=%p] [ebo=%p] [kides=%x] [timer_tree=%p] [dispatchq=%p] [flags=%p]", epo, ebt->ebo, ebt->kides, &ebt->timers, &ebt->dispatchq, &ebt->flags);
+
+    //print dispatchq
+    if(TAILQ_EMPTY(&ebt->dispatchq))
+        err_msg("dispatchq: it's empty!");
+    else
+    {
+        struct ev *e;
+        TAILQ_FOREACH(e, &ebt->dispatchq, dispatchq)
+        {
+            err_msg("dispatchq item: [adr=%p] [kide=%x] [opt=%x]", e, e->kide, e->opt);
+        }
+    }
+
+    //print readev
+    int i, numq = 0;
+    struct ev_io *evi;
+    for (i = 0; i < epo->epsz; i++)
+    {
+        if (epo->readev[i] != NULL)
+        {
+            evi = (struct ev_io *) epo->readev[i];
+            err_msg("readev item: [adr=%p] [fd=%d] [pos=%d]", evi, evi->fd, i);
+        }
+    }
+    //print writev
+    for (i = 0; i < epo->epsz; i++)
+    {
+        if (epo->writev[i] != NULL)
+        {
+            evi = (struct ev_io *) epo->writev[i];
+            err_msg("writev item: [ard=%p] [fd=%d] [pos=%d]", evi, evi->fd, i);
+        }
+    }
+
+    //print timer tree info
+    if (RB_EMPTY(&ebt->timers))
+        err_msg("timer tree: it's empty!");
+    else
+    {
+        struct ev_timer *evt;
+        RB_FOREACH(evt, timer_tree, &ebt->timers)
+        {
+            err_msg("timer tree item: [adr=%p] [remain.tv_sec=%d] [remain.tv_usec=%d]", evt, evt->remain.tv_sec, evt->remain.tv_usec);  
+        }
+    }
+
+    //print flags queue info
+    if (TAILQ_EMPTY(&ebt->flags))
+        err_msg("flagsq: it's empty!");
+    else
+    {
+        struct ev_flag *e;
+        TAILQ_FOREACH(e, &ebt->flags, flags)
+        {
+            err_msg("flagsq item: [adr=%p] [flag=%d]", e, e->flag);
+        }
+    }
+
+    err_msg("ebt total ev nums: [num=%d]", ebt->num);
+    err_msg("ebt total timer nums: [numtimers=%d]", ebt->numtimers);
+    err_msg("ebt total dispatchq nums: [nums=%d]", numq);
+
+    printf("\n\n\n");
 }
