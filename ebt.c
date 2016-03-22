@@ -389,11 +389,6 @@ void cqueue_free(struct cqueue *cq)
         free(cq);
 }
 
-void printCqueue(struct cqueue *cq)
-{
-    err_msg("cq: [adr=%p] [mem=%p] [num=%d] [head=%d] [tail=%d] [tail_tag=%d] [head_tag=%d]", cq, cq->mem, cq->num, cq->head, cq->tail, (int)cq->tail_tag, (int)cq->head_tag);
-}
-
 /******************************************************************/
 /* thread pool                                                    */
 /******************************************************************/
@@ -746,7 +741,7 @@ struct eb_o
     int (*loop)     (struct eb_t *, const struct timeval *);
     int (*attach)   (struct eb_t *, struct ev *);   
     int (*detach)   (struct eb_t *, struct ev *);
-    int (*free) (struct eb_t *);
+    int (*free)     (struct eb_t *);
 };
 
 static compare(struct ev_timer *a, struct ev_timer *b)

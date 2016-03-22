@@ -25,16 +25,17 @@ enum e_opt
 
 typedef void e_cb_t(short, void *);
 
-EBT_API struct ev * ev_read(int fd, e_cb_t *cb, void *arg, enum e_opt opt);
-EBT_API struct ev * ev_write(int fd, e_cb_t *cb, void *arg, enum e_opt opt);
-EBT_API struct ev * ev_timer(const struct timeval *tv, e_cb_t *cb, void *arg, enum e_opt opt);
-EBT_API struct ev * ev_signal(int sig, e_cb_t *cb, void *arg, enum e_opt opt);
-EBT_API struct ev * ev_child(pid_t child, e_cb_t *cb, void *arg, enum e_opt opt);
-EBT_API struct ev * ev_flag(int flag, e_cb_t *cb, void *arg, enum e_opt opt);
+EBT_API struct ev * ev_read(int fd, e_cb_t *cb, void *arg);
+EBT_API struct ev * ev_write(int fd, e_cb_t *cb, void *arg);
+EBT_API struct ev * ev_timer(const struct timeval *tv, e_cb_t *cb, void *arg);
+EBT_API struct ev * ev_signal(int sig, e_cb_t *cb, void *arg);
+EBT_API struct ev * ev_child(pid_t child, e_cb_t *cb, void *arg);
+EBT_API struct ev * ev_flag(int flag, e_cb_t *cb, void *arg);
+EBT_API void ev_opt(struct ev *e, enum e_opt opt);
 EBT_API void ev_free(struct ev *e);
 
 EBT_API int ev_attach(struct ev *e, struct eb_t *ebt);
-EBT_API int ev_detach(struct ev *e);
+EBT_API int ev_detach(struct ev *e, struct eb_t *ebt);
 
 
 EBT_API struct eb_t * ebt_new(enum e_kind kinds);
