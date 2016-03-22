@@ -4,8 +4,8 @@
 
 void flag_cb(short flag, void *arg)
 {
-    err_debug("%s called", __func__);
-    err_msg("%x | %p", flag, arg);
+    printf("%s called", __func__);
+    printf("%x | %p", flag, arg);
 }
 
 int main(void)
