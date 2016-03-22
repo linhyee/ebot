@@ -1083,7 +1083,7 @@ static int epoll_free(struct eb_t *ebt)
 /******************************************************************/
 /* event functions                                                */
 /******************************************************************/
-void ev_init(struct ev *e, enum e_kide kide, e_cb_t *cb, void *arg)
+static void ev_init(struct ev *e, enum e_kide kide, e_cb_t *cb, void *arg)
 {
     e->kide = kide;
     e->cb   = cb;
@@ -1092,6 +1092,7 @@ void ev_init(struct ev *e, enum e_kide kide, e_cb_t *cb, void *arg)
 
 void ev_opt(struct ev *e, enum e_opt opt)
 {
+    assert(e != NULL);
     e->opt |= opt;
 }
 
