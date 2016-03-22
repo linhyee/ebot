@@ -33,20 +33,29 @@ int create_fifo(const char *file)
     if (lstat(file, &st) == 0)
     {
         if ((st.st_mode & S_IFMT) == S_IFREG)
-            err_exit("lstat");
+        {
+            printf("lstat");
+            exit(1);
+        }
     }
     unlink(file);
 
     if (mkfifo(file, 0600) == -1)
-        err_exit("mkfifo");
+    {
+        printf("mkfifo");
+        exit(1);
+    }
 
     int fd;
     fd = open(file, O_RDWR | O_NONBLOCK, 0);
 
     if (fd == -1)
-        err_exit("open");
+    {
+        printf("open");
+        exit(1);
+    }
 
-    err_debug("fifo fd:[%d]", fd);
+    printf("fifo fd:[%d]", fd);
 
     return fd;
 }
