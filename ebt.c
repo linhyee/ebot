@@ -141,7 +141,7 @@ struct cqueue
 #define cqueue_empty(q)             (q->num == 0)
 #define cqueue_full(q)              ((q->head == q->tail) && ( q->tail_tag != q->head_tag))
 
-static set_nonblock(int fd, int nonblock)
+static void set_nonblock(int fd, int nonblock)
 {
     int opts, ret;
 
@@ -151,10 +151,7 @@ static set_nonblock(int fd, int nonblock)
     while(opts < 0 && errno == EINTR);
 
     if (opts < 0)
-    {
-        err_msg("fcntl(%d, F_GETFL) failed.", fd);
-        exit(1);
-    }
+        err_exit("fcntl(%d, F_GETFL) failed.", fd);
 
     if (nonblock)
         opts = opts | O_NONBLOCK;
@@ -168,7 +165,7 @@ static set_nonblock(int fd, int nonblock)
     while (ret < 0 && errno == EINTR);
 
     if (ret < 0)
-        err_msg("fcntl(%d, F_SETFL, opts) failed.", fd);
+        err_exit("fcntl(%d, F_SETFL, opts) failed.", fd);
 }
 
 struct cqueue * cqueue_new(int capacity, int max_elemsize, enum q_flag flags)
@@ -183,11 +180,11 @@ struct cqueue * cqueue_new(int capacity, int max_elemsize, enum q_flag flags)
     {
         int  shmfd    = -1;
         int  shmflag  = MAP_SHARED;
-        char *mapfile = "/dev/zero";
 
 #ifdef MAP_ANONYMOUS
         shmflag |= MAP_ANONYMOUS;
 #else
+        char *mapfile = "/dev/zero";
         if ((shmfd = open(mapfile, O_RDWR)) < 0)
             return NULL;        
 #endif
@@ -515,10 +512,10 @@ int thread_pool_init(struct thread_pool *pool, int num_threads)
 
 static void *thread_route(void *arg)
 {
-    pthread_t thread_id        = pthread_self();
+    pthread_t thread_id = pthread_self();
     struct thread_param *param = (struct thread_param *) arg;
-    struct thread_pool *pool   = param->data;
-    int ret;
+    struct thread_pool *pool = param->data;
+    int ret = 0;
 
     err_msg("thread [%d] is starting to work", thread_id);
 
@@ -744,7 +741,7 @@ struct eb_o
     int (*free)     (struct eb_t *);
 };
 
-static compare(struct ev_timer *a, struct ev_timer *b)
+static int compare(struct ev_timer *a, struct ev_timer *b)
 {
     if (timercmp(&a->remain, &b->remain, <))
         return -1;
@@ -1284,7 +1281,6 @@ static int wait_for_events(struct eb_t *ebt, const struct timeval *start, struct
     struct ev_timer *timer = NULL;
     struct ev_flag *evf;
     struct timeval tv;
-    unsigned int i;
 
     /* 如果存在用户自定义事件, 也放到dispatchq队列 */
     TAILQ_FOREACH(evf, &ebt->flags, flags)  
@@ -1746,7 +1742,7 @@ static int ebt_srv_write(int fd, char *buf, int len)
     return total_len;
 }
 
-static ebt_srv_read(int fd, char *buf, int len)
+static int ebt_srv_read(int fd, char *buf, int len)
 {
     int n = 0, nread;
 
@@ -2027,7 +2023,7 @@ int ebt_srv_listen(struct ebt_srv *srv, short port)
     if (((sfd) = socket(af, SOCK_STREAM, 6)) == -1)
         err_msg("create socket fail: %s", strerror(errno));
 
-    set_nonblock(sfd, 1);
+    // set_nonblock(sfd, 1);
     setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (char *) &on, sizeof(on));
 
 #ifdef WITH_IPV6
@@ -2043,9 +2039,16 @@ int ebt_srv_listen(struct ebt_srv *srv, short port)
 #endif
 
     if (bind(sfd, &sa.u.sa, sa.len) < 0)
+    {
         err_msg("bind: [af=%d] [port=%d] [err=%s]", af, port, strerror(errno));
+        return -1;
+    }
 
-    (void) listen(sfd, 16);
+    if (listen(sfd, 16) < 0)
+    {
+        err_msg("listen: [af=%d] [port=%d] [err=%s]", af, port, strerror(errno));
+        return -1;
+    }
 
     srv->sfd = sfd;
 
@@ -2244,12 +2247,44 @@ int main(int argc, char *argv[])
     ebt_srv_on(&srv, E_CLOSE, on_close);
     ebt_srv_on(&srv, E_SHUTDOWN, on_shutdown);
 
-    // ebt_srv_listen(&srv, 8080);
+
+    int new_fd;
+    int ret;
+    char buf[218];
+    struct sockaddr adr;
+
+    ebt_srv_listen(&srv, 8080);
+
+    while (1)
+    {
+        new_fd = accept(srv.sfd, &srv.sa.u.sa, &srv.sa.len);
+
+        if (new_fd == -1)
+        {
+            err_msg("errno=%d|errstr=%s", errno, strerror(errno));
+            continue;
+        }
+        err_msg("new client connecting: fd=%d", new_fd);
+
+        // ret = read(new_fd, buf, 218);
+        while ((ret = read(new_fd, buf, 218) ) != -1)
+        {
+            if (ret == 0)
+            {
+                err_msg("client [fd=%d] close!", new_fd);
+                close(new_fd);
+                break;
+            }
+
+            printf("read from client:[buf=%s]|[recv=%d]\n", buf, ret);
+            write(new_fd, buf, ret);
+        }
+    }
     // ebt_srv_start(&srv);
 
     ebt_srv_free(&srv);
 
-
+#if 0
     //test ebt
     struct eb_t *ebt = ebt_new(E_READ | E_WRITE | E_TIMER | E_FLAG);
     int fd = create_fifo("ev.fifo");
@@ -2264,6 +2299,7 @@ int main(int argc, char *argv[])
     
     ebt_loop(ebt);
     ebt_free(ebt);
+#endif
 
     return 0;   
 }
