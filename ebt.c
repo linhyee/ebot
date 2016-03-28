@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <string.h>
+#include <hashtable.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
@@ -104,6 +105,31 @@ static void err_doit(int errnoflag, const char *fmt, va_list ap)
     err_msg(fmt, ##__VA_ARGS__);  \
     exit(1);                      \
 } while(0)
+
+/******************************************************************/
+/* buffer                                                         */
+/******************************************************************/
+struct d_trunk_t
+{
+    char *data;
+    uint16_t len;
+    struct d_trunk_t *pre;
+    struct d_trunk_t *next;
+};
+
+struct d_item_t
+{
+    int fd;
+    uint8_t num_trunks;
+    UT_hash_handle uth;
+    struct d_trunk_t *first;
+    struct d_trunk_t *last;
+};
+
+struct d_Buffer
+{
+    struct d_item_t *item;
+};
 
 /******************************************************************/
 /* cqueue                                                         */
