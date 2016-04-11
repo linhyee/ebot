@@ -1651,8 +1651,6 @@ enum s_type
     E_SHUTDOWNED = 8
 };
 
-struct data_buffer;
-
 #define E_MAX_ETYPE       32
 #define E_BACK_LOG        512
 #define E_TIMEOUT_SEC     0
@@ -1660,6 +1658,13 @@ struct data_buffer;
 #define E_NUM_REACTORS    4
 #define E_NUM_FACTORIES   2
 #define E_MASTER_REACTOR  E_NUM_REACTORS
+
+struct buf_Trunk
+{
+    int fd;
+    char *data;
+    uint16_t len;
+};
 
 struct EventData
 {
@@ -1694,7 +1699,7 @@ struct reactor
 struct child_reactor
 {
     struct reactor      reactor;
-    struct data_buffer  *buf;
+    Vec(struct buf_Trunk) buf;
 };
 
 struct master_reactor
@@ -2339,7 +2344,7 @@ int main(int argc, char *argv[])
     ebt_free(ebt);
 #endif
 
-    Vec(int) array;
+    /*Vec(int) array;
     vec_init(&array);
     vec_push(&array, 34);
     vec_push(&array, 12);
@@ -2350,7 +2355,30 @@ int main(int argc, char *argv[])
     err_msg("inum = %d", vec_pop(&array));
     err_msg("inum = %d", vec_pop(&array));
 
-    vec_deinit(&array);
+    vec_deinit(&array);*/
+
+    Vec(struct buf_Trunk) trunk;
+    vec_init(&trunk);
+
+    int i;
+    for (i = 0; i < 10; i++)
+    {
+        struct buf_Trunk bt = {i, "hello world!", i+2};
+        vec_push(&trunk, bt);
+    }
+
+    err_msg("trunk info: length=%d", trunk.length);
+
+
+    for (i = 0; i < 11; i++)
+    {
+        struct buf_Trunk b = vec_pop(&trunk);
+
+        err_msg("trunk info: fd=%d | data=%s | len=%d", b.fd, b.data, b.len);
+    }
+
+    vec_deinit(&trunk);
+
 
     return 0;   
 }
