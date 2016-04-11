@@ -4,7 +4,6 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <string.h>
-#include <hashtable.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
@@ -107,29 +106,58 @@ static void err_doit(int errnoflag, const char *fmt, va_list ap)
 } while(0)
 
 /******************************************************************/
-/* buffer                                                         */
+/* Vec                                                            */
 /******************************************************************/
-struct d_trunk_t
+static void vec_expand(char **data, int *length, 
+    int *capacity, int memsz)
 {
-    char *data;
-    uint16_t len;
-    struct d_trunk_t *pre;
-    struct d_trunk_t *next;
-};
+    if (*length + 1 > *capacity)
+    {
+        *capacity = (*capacity == 0) ? 1 : (*capacity << 1);
+        
+        *data = realloc(*data, (size_t)(*capacity * memsz));
+    }
+}
 
-struct d_item_t
+static void vec_splice(char **data, int *length, 
+    int *capacity, int memsz, int start, int count )
 {
-    int fd;
-    uint8_t num_trunks;
-    UT_hash_handle uth;
-    struct d_trunk_t *first;
-    struct d_trunk_t *last;
-};
+    (void) capacity;
+    memmove(*data + start * memsz,
+            *data + (start + count) * memsz,
+            (*length - start - count) * memsz);
+}             
 
-struct d_Buffer
-{
-    struct d_item_t *item;
-};
+#define Vec(T) \
+    struct { T *data; int length, capacity;}
+
+#define vec_unpack(v) \
+    (char**)&(v)->data, &(v)->length, &(v)->capacity, sizeof(*(v)->data)
+
+#define vec_init(v) \
+    memset((v), 0, sizeof(*(v)))
+
+#define vec_deinit(v) \
+    free((v)->data)
+
+#define vec_clear(v) \
+    ((v)->length = 0)
+
+#define vec_push(v, val) \
+    (vec_expand(vec_unpack(v)), \
+    (v)->data[(v)->length++] = (val) )
+
+#define vec_pop(v) \
+    (assert((v)->length > 0), \
+    (v)->data[-- (v)->length])
+
+#define vec_get(v, pos) \
+    (assert(pos < (v)->length), \
+    (v)->data[pos])
+
+#define vec_splice(v, start, count)\
+    (vec_splice(vec_unpack(v), start, count), \
+    (v)->length -= (count))
 
 /******************************************************************/
 /* cqueue                                                         */
@@ -289,10 +317,8 @@ int cqueue_shift(struct cqueue *cq, void *item, int item_size)
     /* if cqueue was empty*/
     if (cqueue_empty(cq))   
     {
-        // err_msg("cqueue is empty.");
         /* important! avoid thread to get lock again */
         sched_yield();
-        //usleep(1);
         return -1;
     }
 
@@ -320,9 +346,7 @@ int cqueue_unshift(struct cqueue *cq, void *item, int item_size)
     /* when cqueue was empty! */
     if (cqueue_full(cq))
     {
-        // err_msg("cqueue is full.");
         sched_yield();
-
         return -1;
     }
 
@@ -453,14 +477,14 @@ struct thread_entity
 
 struct thread_pool
 {
-    pthread_mutex_t         mutex;
-    pthread_cond_t          cond;
-    struct thread_entity    *threads;
-    struct thread_param     *params;
-    struct cqueue           *cq;
-    int                     num_threads;
-    int                     shutdown;
-    _u32_t                  num_tasks;
+    struct thread_entity *threads;
+    struct thread_param *params;
+    struct cqueue *cq;
+    int num_threads;
+    int shutdown;
+    _u32_t num_tasks;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
 };
 
 static void thread_setup(struct thread_entity *me)
@@ -468,8 +492,7 @@ static void thread_setup(struct thread_entity *me)
     me->cq = cqueue_new(1024 * 256, 512, 0);
     if (me->cq == NULL)
     {
-        err_msg("can't allocate memory for cq queue!");
-        exit(EXIT_FAILURE);
+        err_exit("can't allocate memory for cq queue!");
     }
 }
 
@@ -490,27 +513,21 @@ int thread_pool_init(struct thread_pool *pool, int num_threads)
     memset(pool, 0, sizeof(struct thread_pool));
 
     pool->threads = calloc(num_threads, sizeof(struct thread_entity));
+
     if (!pool->threads)
-    {
-        err_msg("can't allocate thread descriptors!");
-        exit(1);
-    }
+        err_exit ("can't allocate thread descriptors!");
 
     pool->params  = calloc(num_threads, sizeof(struct thread_param));
+
     if (pool->params == NULL)
-    {
-        err_msg("can't allocate thread params!");
-        exit(1);
-    }
+        err_exit ("can't allocate thread params!");
 
     for (i = 0; i <num_threads; i++)
     {
         int fds[2];
+
         if (pipe(fds))
-        {
-            err_msg("can't create notify pipe!");
-            exit(1);
-        }
+            err_exit ("can't create notify pipe!");
 
         pool->threads[i].id = i;
         pool->threads[i].notify_recv_fd = fds[0];
@@ -522,10 +539,7 @@ int thread_pool_init(struct thread_pool *pool, int num_threads)
     pool->cq = cqueue_new(1024 * 256, 512, 0);
 
     if (pool->cq == NULL)
-    {
-        err_msg("can't create cq queue!");
-        exit(1);
-    }
+        err_exit ("can't create cq queue!");
 
     pthread_mutex_init(&pool->mutex, NULL);
     pthread_cond_init(&pool->cond, NULL);
@@ -592,8 +606,7 @@ void thread_pool_run(struct thread_pool *pool, void *(*func)(void *))
 
         if (ret < 0)
         {
-            err_msg("can't create thread, error for %s!", strerror(errno));
-            exit(1);
+            err_exit ("can't create thread, error for %s!", strerror(errno));
         }
     }
 
@@ -817,8 +830,7 @@ static int epoll_attach     (struct eb_t *, struct ev *);
 static int epoll_detach     (struct eb_t *, struct ev *);
 static int epoll_free       (struct eb_t *);
 
-// void eventq_in(struct ev *);
-int eventq_in(struct ev *);
+static int eventq_in(struct ev *);
 
 const struct eb_o ebo_epoll = {
     .name   = "epoll",
@@ -899,14 +911,12 @@ static int epoll_loop(struct eb_t *ebt, const struct timeval *tv)
     if (tv != NULL)
         timeout = tv->tv_sec * 1000 + (tv->tv_usec + 999) / 1000;
     else
-        timeout = 2 *1000;
+        timeout = 0;
 
     cnt = epoll_wait(epo->epfd, epo->epevents, epo->epsz, timeout);
 
     if (cnt < 0)
         return errno == EINTR ? 0: -1;
-    else
-        err_debug("errno=%d | errstr=%s", errno, strerror(errno));
 
     epo->nfds = cnt;
 
@@ -1514,7 +1524,7 @@ int ev_detach(struct ev *e, struct eb_t *ebt)
  * \param e struct ev*
  * 
  */
-int eventq_in(struct ev *e)
+static int eventq_in(struct ev *e)
 {
     if (e->opt & E_QUEUE)
         return -1;
@@ -2274,6 +2284,7 @@ int main(int argc, char *argv[])
     ebt_srv_on(&srv, E_SHUTDOWN, on_shutdown);
 
 
+#if 0
     int new_fd;
     int ret;
     char buf[218];
@@ -2309,6 +2320,7 @@ int main(int argc, char *argv[])
     // ebt_srv_start(&srv);
 
     ebt_srv_free(&srv);
+#endif
 
 #if 0
     //test ebt
@@ -2326,6 +2338,19 @@ int main(int argc, char *argv[])
     ebt_loop(ebt);
     ebt_free(ebt);
 #endif
+
+    Vec(int) array;
+    vec_init(&array);
+    vec_push(&array, 34);
+    vec_push(&array, 12);
+    vec_push(&array, 'c');
+
+    err_msg("inum = %d", vec_pop(&array));
+    err_msg("inum = %d", vec_pop(&array));
+    err_msg("inum = %d", vec_pop(&array));
+    err_msg("inum = %d", vec_pop(&array));
+
+    vec_deinit(&array);
 
     return 0;   
 }
