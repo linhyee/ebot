@@ -926,6 +926,8 @@ static int epoll_loop(struct eb_t *ebt, const struct timeval *tv)
         struct epoll_event *ev = epo->epevents + i;
 
         int fd = (uint32_t) ev->data.u64;
+
+        //这里有一个问题,当按下ctrl+c终止连接时, got的值总是: got = E_WRITE | E_READ
         int got = (ev->events & (EPOLLOUT | EPOLLERR | EPOLLHUP) ? E_WRITE : 0)
                 | (ev->events & (EPOLLIN | EPOLLERR | EPOLLHUP) ? E_READ : 0);
 
@@ -1526,7 +1528,7 @@ int ev_detach(struct ev *e, struct eb_t *ebt)
  */
 static int eventq_in(struct ev *e)
 {
-    if (e->opt & E_QUEUE)
+    if (!e || e->opt & E_QUEUE)
         return -1;
 
     TAILQ_INSERT_TAIL(&e->ebt->dispatchq, e, dispatchq);
@@ -1750,8 +1752,8 @@ struct ebt_srv
 
 #define ebt_srv_get_thread(srv, w, n)   (srv->w.threads[n])
 #define ebt_srv_get_param(srv, w, n)    (srv->w.params[n])
-#define ebt_srv_get_reactor(srv, n)     (struct reactor *) ebt_srv_get_thread(srv, reactor_pool, n).data.ptr
-#define ebt_srv_get_factory(srv, n)     (struct factory *) ebt_srv_get_thread(srv, factory_pool, n).data.ptr
+#define ebt_srv_get_reactor(srv, n)     (struct reactor *) (ebt_srv_get_thread(srv, reactor_pool, n).data.ptr)
+#define ebt_srv_get_factory(srv, n)     (struct factory *) (ebt_srv_get_thread(srv, factory_pool, n).data.ptr)
 
 static int ebt_srv_write(int fd, char *buf, int len)
 {
@@ -1826,26 +1828,22 @@ ebt_srv_reactors_init(struct ebt_srv *srv)
 {
     int i;
     int size = srv->settings.num_reactors;
-    struct reactor *reactors;
+    struct child_reactor *reactors;
 
     reactors = calloc(size, sizeof (struct child_reactor));
 
     if (reactors == NULL)
-    {
-        err_msg("can't allocate memory for reactor pool!");
-        return -1;
-    }
+        err_exit("can't allocate memory for reactor pool!");
 
     //初始化线程池, 并为线程分配反应堆
     thread_pool_init(&srv->reactor_pool, size);
 
     for (i = 0; i < size; i++)
     {
-        struct reactor *reactor = ebt_srv_get_reactor(srv, i);
+        srv->reactor_pool.threads[i].data.ptr = &reactors[i];
 
-        reactor = &reactors[i];
-        reactor->reactor_id = i;
-        reactor->ptr = srv;
+        reactors[i].reactor.reactor_id = i;
+        reactors[i].reactor.ptr = srv;
 
         //TODO: 创建data_buf   
     }
@@ -1863,30 +1861,31 @@ ebt_srv_factories_init(struct ebt_srv *srv)
     factories = calloc(size, sizeof * factories);
 
     if (factories == NULL)
-    {
-        err_msg("can't allocate memory for factory  pool!");
-        return -1;
-    }
+        err_exit("can't allocate memory for factory  pool!");
 
     thread_pool_init(&srv->factory_pool, size);
 
     //为线程分配任务调度器实例
     for (i = 0; i < size; i++)
     {
-        struct factory *factory = ebt_srv_get_factory(srv, i);
+        srv->factory_pool.threads[i].data.ptr = &factories[i];
 
-        factory = &factories[i];
-        factory->factory_id = i;
-        factory->ptr = srv;
-        factory->task = srv->handles[E_RECEIVE];
-
+        factories[i].factory_id = i;
+        factories[i].ptr = srv;
+        factories[i].task = srv->handles[E_RECEIVE];
     }
 
     return 0;
 }
 static void ebt_srv_event_nofitify(short num , struct ebt_srv *srv)
 {
+    int r;
+    int fd = num;
+    char buf[512];
 
+    r = read(fd, buf, sizeof(buf));
+
+    err_msg("read: buf=%s | r=%d", buf, r);
 }
 
 static void ebt_srv_event_close(short num, struct ebt_srv *srv)
@@ -1904,18 +1903,22 @@ static void* ebt_srv_poll_routine(void *arg)
     int n;
     struct thread_param *param;
     struct thread_entity *thread;
+    struct thread_pool *reactor_pool;
     struct reactor *reactor;
     struct ebt_srv *srv;
     struct ev *ev;
 
-    param = (struct thread_param *) arg;
-    n     = param->id;
-    srv   = param->data;
-
-    reactor = ebt_srv_get_reactor(srv, n);
+    param         = (struct thread_param *) arg;
+    n             = param->id;
+    reactor_pool  = param->data;
+    thread        = &reactor_pool->threads[n];
+    reactor       = (struct reactor *) thread->data.ptr;
+    srv           = reactor->ptr;
     reactor->base = ebt_new(E_READ | E_WRITE);
 
-    thread = &ebt_srv_get_thread(srv, reactor_pool, n);
+
+    err_msg("child reactor thread starting: threadId=%d | reactorId=%d |reactorEPFD=%d", thread->thread_id, reactor->reactor_id,
+    ((struct ebt_epoll *) (reactor->base))->epfd );
 
     ev = ev_read(thread->notify_recv_fd, (void (*)(short, void*)) ebt_srv_event_nofitify, srv);
 
@@ -1930,6 +1933,8 @@ static int ebt_srv_poll_start(struct ebt_srv *srv)
 {
     int i;
     int size = srv->settings.num_reactors;
+
+    err_msg("MainThread: poll thread starting...! num_reactors=%d", size);
 
     for (i = 0; i < size; i++)
     {
@@ -1947,16 +1952,18 @@ static void ebt_srv_poll_event_process(short num, struct ebt_srv *srv)
     struct factory *factory;
     struct EventData edata;
 
-    n = ebt_srv_read(fd, edata.data, sizeof(edata.data));
+    // n = ebt_srv_read(fd, edata.data, sizeof(edata.data));
 
-    if (n < 0)
-        return;
-    else if (n == 0)
-        ebt_srv_close();
-    else
-    {
+    // if (n < 0)
+    //     return;
+    // else if (n == 0)
+    //     ebt_srv_close();
+    // else
+    // {
         
-    }
+    // }
+
+    err_msg("fd=%d", fd);
 }
 
 static int ebt_srv_factory_start(struct ebt_srv *srv)
@@ -2008,6 +2015,7 @@ static void ebt_srv_accept(short sfd, struct ebt_srv *srv)
         edata.type            = E_CONNECTED;
         edata.len             = sizeof(new_fd);
         edata.from_reactor_id = reactor->reactor_id;
+
         strcpy(edata.data, "client connected");
 
         //回调connent方法
@@ -2064,7 +2072,7 @@ int ebt_srv_listen(struct ebt_srv *srv, short port)
     if (((sfd) = socket(af, SOCK_STREAM, 6)) == -1)
         err_msg("create socket fail: %s", strerror(errno));
 
-    // set_nonblock(sfd, 1);
+    set_nonblock(sfd, 1);
     setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (char *) &on, sizeof(on));
 
 #ifdef WITH_IPV6
@@ -2090,6 +2098,7 @@ int ebt_srv_listen(struct ebt_srv *srv, short port)
         err_msg("listen: [af=%d] [port=%d] [err=%s]", af, port, strerror(errno));
         return -1;
     }
+    err_msg("server listening on port:%d", port);
 
     srv->sfd = sfd;
 
@@ -2289,43 +2298,8 @@ int main(int argc, char *argv[])
     ebt_srv_on(&srv, E_SHUTDOWN, on_shutdown);
 
 
-#if 0
-    int new_fd;
-    int ret;
-    char buf[218];
-    struct sockaddr adr;
-
     ebt_srv_listen(&srv, 8080);
-
-    while (1)
-    {
-        new_fd = accept(srv.sfd, &srv.sa.u.sa, &srv.sa.len);
-
-        if (new_fd == -1)
-        {
-            err_msg("errno=%d|errstr=%s", errno, strerror(errno));
-            continue;
-        }
-        err_msg("new client connecting: fd=%d", new_fd);
-
-        // ret = read(new_fd, buf, 218);
-        while ((ret = read(new_fd, buf, 218) ) != -1)
-        {
-            if (ret == 0)
-            {
-                err_msg("client [fd=%d] close!", new_fd);
-                close(new_fd);
-                break;
-            }
-
-            printf("read from client:[buf=%s]|[recv=%d]\n", buf, ret);
-            write(new_fd, buf, ret);
-        }
-    }
-    // ebt_srv_start(&srv);
-
-    ebt_srv_free(&srv);
-#endif
+    ebt_srv_start(&srv);
 
 #if 0
     //test ebt
@@ -2344,7 +2318,8 @@ int main(int argc, char *argv[])
     ebt_free(ebt);
 #endif
 
-    /*Vec(int) array;
+#if 0
+    Vec(int) array;
     vec_init(&array);
     vec_push(&array, 34);
     vec_push(&array, 12);
@@ -2355,7 +2330,7 @@ int main(int argc, char *argv[])
     err_msg("inum = %d", vec_pop(&array));
     err_msg("inum = %d", vec_pop(&array));
 
-    vec_deinit(&array);*/
+    vec_deinit(&array);
 
     Vec(struct buf_Trunk) trunk;
     vec_init(&trunk);
@@ -2370,14 +2345,15 @@ int main(int argc, char *argv[])
     err_msg("trunk info: length=%d", trunk.length);
 
 
-    for (i = 0; i < 11; i++)
+    for (i = 0; i < trunk.length; i++)
     {
-        struct buf_Trunk b = vec_pop(&trunk);
+        struct buf_Trunk b = vec_get(&trunk, i);
 
         err_msg("trunk info: fd=%d | data=%s | len=%d", b.fd, b.data, b.len);
     }
 
     vec_deinit(&trunk);
+#endif
 
 
     return 0;   
@@ -2385,6 +2361,7 @@ int main(int argc, char *argv[])
 
 int on_connect(struct EventData *data)
 {
+    err_msg("new client connected: fd=%d | reactor_id=%d | data=%s", data->fd, data->from_reactor_id, data->data);
     return 0;
 }
 int on_receive(struct EventData *data)
