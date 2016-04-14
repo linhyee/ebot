@@ -931,6 +931,8 @@ static int epoll_loop(struct eb_t *ebt, const struct timeval *tv)
         int got = (ev->events & (EPOLLOUT | EPOLLERR | EPOLLHUP) ? E_WRITE : 0)
                 | (ev->events & (EPOLLIN | EPOLLERR | EPOLLHUP) ? E_READ : 0);
 
+        err_msg("fd=%d | i=%d | cnt=%d", fd, i, cnt);
+
         if (got & E_READ)
             eventq_in((struct ev *) epo->readev[fd]);
 
@@ -1480,11 +1482,13 @@ int ev_attach(struct ev *e, struct eb_t *ebt)
 
 int ev_detach(struct ev *e, struct eb_t *ebt)
 {
+    err_msg("ggggggggggggggggggg");
     if (e->ebt == NULL)
     {
         errno = EINVAL;
         return -1;
     }
+    err_msg("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
 
     switch (e->kide)
     {
@@ -1501,12 +1505,18 @@ int ev_detach(struct ev *e, struct eb_t *ebt)
 
         default:
             if (ebt->ebo->detach(ebt, e) < 0)
+            {
+                err_msg("DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD");
                 return -1;
+            }
+            err_msg("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC");
             break;
     }
+    err_msg("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB, %x", e->opt);
 
     if (e->opt & E_QUEUE)
     {
+        err_msg("ssssssssssssssss");
         TAILQ_REMOVE(&ebt->dispatchq, e, dispatchq);
         e->opt &= ~E_QUEUE;
     }
@@ -1674,7 +1684,7 @@ struct EventData
     int type;
     uint16_t len;
     uint16_t from_reactor_id;
-    char data[2048];
+    // char data[2048];
 };
 
 struct sa
@@ -1890,12 +1900,54 @@ static void ebt_srv_event_nofitify(short num , struct ebt_srv *srv)
 
 static void ebt_srv_event_close(short num, struct ebt_srv *srv)
 {
+    struct EventData edata;
+    struct reactor *reactor;
+    struct ev_io *evr, *evw;
+    int r;
 
+    r = ebt_srv_read(srv->pipe[0], (char *)&edata, sizeof(edata));
+
+    if (r < 0)
+    {
+        err_msg("masterThread read from pipe fail");
+        return;
+    }
+    err_msg("num=%d | fd=%d", num, edata.fd);
+
+    reactor = ebt_srv_get_reactor(srv, edata.from_reactor_id);
+    evr = ((struct ebt_epoll *) (reactor->base))->readev[edata.fd];
+    evw = ((struct ebt_epoll *) (reactor->base))->writev[edata.fd];
+
+    //回调close
+    if (srv->handles[E_CLOSE])
+        srv->handles[E_CLOSE](&edata);
+
+    if (evr) {
+        err_msg("num=%d | fd=%d", num, edata.fd);
+        ev_detach((struct ev *) evr, reactor->base);
+    }
+
+    if (evw)
+        ev_detach((struct ev *) evw, reactor->base);
+
+    close(edata.fd);
 }
 
-static void ebt_srv_close()
+static void ebt_srv_close(struct ebt_srv *srv, struct EventData *edata)
 {
+    if (edata->from_reactor_id > srv->settings.num_reactors)
+    {
+        err_msg("fromID > num_reactors");
+        return;
+    }
 
+    int r;
+    struct EventData ed;
+    memcpy(&ed, edata, sizeof (struct EventData));
+    r = write(srv->pipe[1], &ed, sizeof(ed));
+
+    if (r < 0)
+        err_msg("childThread write to pip fail, r=%d | errno=%d | errstr=%s", r, errno, strerror(errno));
 }
 
 static void* ebt_srv_poll_routine(void *arg)
@@ -1945,25 +1997,37 @@ static int ebt_srv_poll_start(struct ebt_srv *srv)
     return 0;
 }
 
-static void ebt_srv_poll_event_process(short num, struct ebt_srv *srv)
+static void ebt_srv_poll_event_process(short num, struct reactor *reactor)
 {
     int fd = num;
     int n;
     struct factory *factory;
     struct EventData edata;
+    struct ebt_srv *srv;
+    char buf[512] = {0};
 
-    // n = ebt_srv_read(fd, edata.data, sizeof(edata.data));
+    srv = (struct ebt_srv *)reactor->ptr;
+    n   = read(fd, buf, sizeof(buf));
 
-    // if (n < 0)
-    //     return;
-    // else if (n == 0)
-    //     ebt_srv_close();
-    // else
-    // {
-        
-    // }
+    if (n == 0)
+    {
+        err_msg("client disconnect");
 
-    err_msg("fd=%d", fd);
+        edata.fd = fd;
+        edata.len = sizeof(fd);
+        edata.from_reactor_id = reactor->reactor_id;
+        ebt_srv_close(srv, &edata);
+    }
+    else if (n > 0)
+    {
+        err_msg("fd=%d | total recv=%d | buf=%s", fd, n, buf);
+
+        write(fd, buf, n);
+    }
+    else
+    {
+        err_msg("handle fail!");
+    }
 }
 
 static int ebt_srv_factory_start(struct ebt_srv *srv)
@@ -2005,18 +2069,16 @@ static void ebt_srv_accept(short sfd, struct ebt_srv *srv)
         reactor = ebt_srv_get_reactor(srv, n);
 
         //将new_fd添加到子反应堆
-        ev = ev_read(new_fd, (void(*)(short, void *)) ebt_srv_poll_event_process, srv);
+        ev = ev_read(new_fd, (void(*)(short, void *)) ebt_srv_poll_event_process, reactor);
         r  = ev_attach(ev, reactor->base);
 
         if (r < 0)
-            err_msg("masterThread add event fail [cli_fd=%d] [reactor_id=%d]!", new_fd, reactor->reactor_id);
+            err_msg("masterThread dispatched event fail [cli_fd=%d] [reactor_id=%d]!", new_fd, reactor->reactor_id);
 
         edata.fd              = new_fd;
         edata.type            = E_CONNECTED;
         edata.len             = sizeof(new_fd);
         edata.from_reactor_id = reactor->reactor_id;
-
-        strcpy(edata.data, "client connected");
 
         //回调connent方法
         srv->handles[E_CONNECT](&edata);
@@ -2039,6 +2101,8 @@ int ebt_srv_create(struct ebt_srv *srv)
         err_msg("can't create pipe!");
         return -1;
     }
+    set_nonblock(srv->pipe[0], 1);
+    set_nonblock(srv->pipe[1], 1);
 
     //初始化反应堆线程池和任务调度线程池
     r = ebt_srv_reactors_init(srv);
@@ -2361,7 +2425,7 @@ int main(int argc, char *argv[])
 
 int on_connect(struct EventData *data)
 {
-    err_msg("new client connected: fd=%d | reactor_id=%d | data=%s", data->fd, data->from_reactor_id, data->data);
+    err_msg("new client connected: fd=%d | reactor_id=%d | data=%s", data->fd, data->from_reactor_id, "hello");
     return 0;
 }
 int on_receive(struct EventData *data)
@@ -2370,6 +2434,7 @@ int on_receive(struct EventData *data)
 }
 int on_close(struct EventData *data)
 {
+    err_msg("client [fd=%d] [reactorId=%d] disconnected", data->fd, data->from_reactor_id);
     return 0;
 }
 int on_shutdown(struct EventData *data)
