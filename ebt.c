@@ -931,8 +931,6 @@ static int epoll_loop(struct eb_t *ebt, const struct timeval *tv)
         int got = (ev->events & (EPOLLOUT | EPOLLERR | EPOLLHUP) ? E_WRITE : 0)
                 | (ev->events & (EPOLLIN | EPOLLERR | EPOLLHUP) ? E_READ : 0);
 
-        err_msg("fd=%d | i=%d | cnt=%d", fd, i, cnt);
-
         if (got & E_READ)
             eventq_in((struct ev *) epo->readev[fd]);
 
@@ -1410,7 +1408,7 @@ static void dispatch_queue(struct eb_t *ebt)
 
             /* 如果是一次性的事件? 立刻移除 */
             opt = e->opt;
-            e->opt &= ~ E_FREE; //这里移除FREE标记, 先将事件从队列踢出, 但不会即释放其空间, 不然无法回调cb函数
+            e->opt &= ~ E_FREE; //这里移除FREE标记, 先将事件从队列踢出, 但不会即释放其空间, 不然无法回调cb函数(但是会导致后面不能free)
             if (e->opt & E_ONCE)
                 ev_detach(e, ebt);
 
@@ -1482,13 +1480,11 @@ int ev_attach(struct ev *e, struct eb_t *ebt)
 
 int ev_detach(struct ev *e, struct eb_t *ebt)
 {
-    err_msg("ggggggggggggggggggg");
     if (e->ebt == NULL)
     {
         errno = EINVAL;
         return -1;
     }
-    err_msg("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
 
     switch (e->kide)
     {
@@ -1505,18 +1501,12 @@ int ev_detach(struct ev *e, struct eb_t *ebt)
 
         default:
             if (ebt->ebo->detach(ebt, e) < 0)
-            {
-                err_msg("DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD");
                 return -1;
-            }
-            err_msg("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC");
             break;
     }
-    err_msg("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB, %x", e->opt);
 
     if (e->opt & E_QUEUE)
     {
-        err_msg("ssssssssssssssss");
         TAILQ_REMOVE(&ebt->dispatchq, e, dispatchq);
         e->opt &= ~E_QUEUE;
     }
@@ -1814,7 +1804,10 @@ static int ebt_srv_read(int fd, char *buf, int len)
         else
         {
             n += nread;
-            if (n == len) break;
+            
+            if (n == len)
+                break;
+
             continue;
         }
     }
@@ -2004,19 +1997,37 @@ static void ebt_srv_poll_event_process(short num, struct reactor *reactor)
     struct factory *factory;
     struct EventData edata;
     struct ebt_srv *srv;
-    char buf[512] = {0};
+    char buf[8192] = {0};
 
     srv = (struct ebt_srv *)reactor->ptr;
     n   = read(fd, buf, sizeof(buf));
 
     if (n == 0)
     {
-        err_msg("client disconnect");
 
         edata.fd = fd;
         edata.len = sizeof(fd);
         edata.from_reactor_id = reactor->reactor_id;
-        ebt_srv_close(srv, &edata);
+        // ebt_srv_close(srv, &edata);
+
+        struct ev_io *evr, *evw;
+        evr = ((struct ebt_epoll *) (reactor->base))->readev[edata.fd];
+        evw = ((struct ebt_epoll *) (reactor->base))->writev[edata.fd];
+
+        //回调close
+        if (srv->handles[E_CLOSE])
+            srv->handles[E_CLOSE](&edata);
+
+        if (evr) {
+            err_msg("num=%d | fd=%d", num, edata.fd);
+            ev_detach((struct ev *) evr, reactor->base);
+        }
+
+        if (evw)
+            ev_detach((struct ev *) evw, reactor->base);
+
+        err_msg("client disconnect: fd=%d | reactorId=%d", fd, reactor->reactor_id);
+        close(edata.fd);
     }
     else if (n > 0)
     {
@@ -2134,7 +2145,7 @@ int ebt_srv_listen(struct ebt_srv *srv, short port)
 #endif
 
     if (((sfd) = socket(af, SOCK_STREAM, 6)) == -1)
-        err_msg("create socket fail: %s", strerror(errno));
+        err_exit("create socket fail: %s", strerror(errno));
 
     set_nonblock(sfd, 1);
     setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (char *) &on, sizeof(on));
@@ -2152,16 +2163,11 @@ int ebt_srv_listen(struct ebt_srv *srv, short port)
 #endif
 
     if (bind(sfd, &sa.u.sa, sa.len) < 0)
-    {
-        err_msg("bind: [af=%d] [port=%d] [err=%s]", af, port, strerror(errno));
-        return -1;
-    }
+        err_exit("bind: [af=%d] [port=%d] [err=%s]", af, port, strerror(errno));
 
     if (listen(sfd, 16) < 0)
-    {
-        err_msg("listen: [af=%d] [port=%d] [err=%s]", af, port, strerror(errno));
-        return -1;
-    }
+        err_exit("listen: [af=%d] [port=%d] [err=%s]", af, port, strerror(errno));
+
     err_msg("server listening on port:%d", port);
 
     srv->sfd = sfd;
