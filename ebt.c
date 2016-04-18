@@ -1003,7 +1003,7 @@ static int epoll_attach(struct eb_t *ebt, struct ev *e)
     int op     = EPOLL_CTL_ADD;
     int events = 0;
 
-    events = (evf->event.kide & E_READ ? EPOLLIN: 0) | (evf->event.kide & E_WRITE ? EPOLLOUT : 0);
+    events = (evf->event.kide & E_READ ? EPOLLIN | EPOLLET: 0) | (evf->event.kide & E_WRITE ? EPOLLOUT : 0);
 
     if (epo->readev[evf->fd] != NULL)
     {
@@ -1072,7 +1072,7 @@ static int epoll_detach(struct eb_t *ebt, struct ev *e)
         else if ((events & EPOLLOUT) && epo->readev[evf->fd] != NULL)
         {
             rd     = 0;
-            events = EPOLLIN;
+            events = EPOLLIN | EPOLLET;
             op     = EPOLL_CTL_MOD;
         }
     }
@@ -1136,7 +1136,7 @@ struct ev * ev_read(int fd, e_cb_t *cb, void *arg)
     struct ev_io *event;    
     event = calloc(1, sizeof (*event));
 
-    if (event == NULL)
+    if (!event)
     {
         err_msg("calloc failed!");
         return NULL;
@@ -1153,7 +1153,7 @@ struct ev * ev_write(int fd, e_cb_t *cb, void *arg)
     struct ev_io *event;
     event = calloc(1, sizeof (*event));
 
-    if (event == NULL)
+    if (!event)
     {
         err_msg("calloc failed!");
         return NULL;
@@ -1170,7 +1170,7 @@ struct ev * ev_timer(const struct timeval *tv, e_cb_t *cb, void *arg)
     struct ev_timer *event;
     event = calloc(1, sizeof (*event));
 
-    if (event == NULL)
+    if (!event)
     {
         err_msg("calloc failed!");
         return NULL;
@@ -1187,7 +1187,7 @@ struct ev * ev_signal(int sig, e_cb_t *cb, void *arg)
     struct ev_signal *event;
     event = calloc(1, sizeof (*event));
 
-    if (event == NULL)
+    if (!event)
     {
         err_msg("calloc failed!");
         return NULL;
@@ -1204,7 +1204,7 @@ struct ev * ev_child(pid_t pid, e_cb_t *cb, void *arg)
     struct ev_child *event;
     event = calloc(1, sizeof (*event));
 
-    if (event == NULL)
+    if (!event)
     {
         err_msg("calloc failed!");
         return NULL;
@@ -1221,7 +1221,7 @@ struct ev * ev_flag(int flag, e_cb_t *cb, void *arg)
     struct ev_flag *event;
     event = calloc(1, sizeof (*event));
 
-    if (event == NULL)
+    if (!event)
     {
         err_msg("calloc failed!");
         return NULL;
@@ -1674,7 +1674,6 @@ struct EventData
     int type;
     uint16_t len;
     uint16_t from_reactor_id;
-    // char data[2048];
 };
 
 struct sa
@@ -1691,11 +1690,11 @@ struct sa
 
 struct reactor
 {
-    struct eb_t        *base;
-    struct factory     *factory;
-    void               *ptr;
-    int                 reactor_id;
-    int                 status; 
+    struct eb_t    *base;
+    struct factory *factory;
+    void           *ptr;
+    int            reactor_id;
+    int            status; 
 };
 
 struct child_reactor
@@ -1715,8 +1714,8 @@ struct factory
     int     factory_id;
     int     status;
     int     max_request;
-    void    *ptr;
 
+    void    *ptr;
     int (*task)(struct EventData *);
 };
 
@@ -1740,14 +1739,15 @@ typedef int (*e_handle_t)(struct EventData *);
 
 struct ebt_srv
 {
-    struct settings         settings;           //应用服务配置
-    struct master_reactor   mreactor;           //主反应堆
-    struct thread_pool      reactor_pool;       //子反应堆线程池
-    struct thread_pool      factory_pool;       //任务调度线程池
-    struct sa               sa;                 //
-    int                     pipe[2];            //通信管道
-    int                     sfd;                //服务器套接字
-    e_handle_t              handles[E_MAX_ETYPE];//注册到服务对象的回调 
+    struct settings       settings;           //应用服务配置
+    struct master_reactor mreactor;           //主反应堆
+    struct thread_pool    reactor_pool;       //子反应堆线程池
+    struct thread_pool    factory_pool;       //任务调度线程池
+    struct sa             sa;                 //服务器句柄
+    int                   pipe[2];            //通信管道
+    int                   sfd;                //服务器套接字
+    int                   status;             //服务器状态
+    e_handle_t            handles[E_MAX_ETYPE];//注册到服务对象的回调 
 };
 
 #define ebt_srv_get_thread(srv, w, n)   (srv->w.threads[n])
@@ -1755,7 +1755,7 @@ struct ebt_srv
 #define ebt_srv_get_reactor(srv, n)     (struct reactor *) (ebt_srv_get_thread(srv, reactor_pool, n).data.ptr)
 #define ebt_srv_get_factory(srv, n)     (struct factory *) (ebt_srv_get_thread(srv, factory_pool, n).data.ptr)
 
-static int ebt_srv_write(int fd, char *buf, int len)
+static int nWrite(int fd, char *buf, int len)
 {
     int nwrite = 0;
     int total_len = 0;
@@ -1785,7 +1785,7 @@ static int ebt_srv_write(int fd, char *buf, int len)
     return total_len;
 }
 
-static int ebt_srv_read(int fd, char *buf, int len)
+static int nRead(int fd, char *buf, int len)
 {
     int n = 0, nread;
 
@@ -1835,7 +1835,7 @@ ebt_srv_reactors_init(struct ebt_srv *srv)
 
     reactors = calloc(size, sizeof (struct child_reactor));
 
-    if (reactors == NULL)
+    if (!reactors)
         err_exit("can't allocate memory for reactor pool!");
 
     //初始化线程池, 并为线程分配反应堆
@@ -1847,8 +1847,6 @@ ebt_srv_reactors_init(struct ebt_srv *srv)
 
         reactors[i].reactor.reactor_id = i;
         reactors[i].reactor.ptr = srv;
-
-        //TODO: 创建data_buf   
     }
 
     return 0;
@@ -1863,7 +1861,7 @@ ebt_srv_factories_init(struct ebt_srv *srv)
 
     factories = calloc(size, sizeof * factories);
 
-    if (factories == NULL)
+    if (!factories)
         err_exit("can't allocate memory for factory  pool!");
 
     thread_pool_init(&srv->factory_pool, size);
@@ -1898,30 +1896,30 @@ static void ebt_srv_event_close(short num, struct ebt_srv *srv)
     struct ev_io *evr, *evw;
     int r;
 
-    r = ebt_srv_read(srv->pipe[0], (char *)&edata, sizeof(edata));
+    r = nRead(srv->pipe[0], (char *)&edata, sizeof(edata));
 
     if (r < 0)
-    {
-        err_msg("masterThread read from pipe fail");
         return;
-    }
-    err_msg("num=%d | fd=%d", num, edata.fd);
 
     reactor = ebt_srv_get_reactor(srv, edata.from_reactor_id);
-    evr = ((struct ebt_epoll *) (reactor->base))->readev[edata.fd];
-    evw = ((struct ebt_epoll *) (reactor->base))->writev[edata.fd];
+    evr     = ((struct ebt_epoll *) (reactor->base))->readev[edata.fd];
+    evw     = ((struct ebt_epoll *) (reactor->base))->writev[edata.fd];
 
     //回调close
     if (srv->handles[E_CLOSE])
         srv->handles[E_CLOSE](&edata);
 
-    if (evr) {
-        err_msg("num=%d | fd=%d", num, edata.fd);
+    if (evr)
+    {
+        ev_opt((struct ev *)evr, E_FREE);
         ev_detach((struct ev *) evr, reactor->base);
     }
 
     if (evw)
+    {
+        ev_opt((struct ev *)evw, E_FREE);
         ev_detach((struct ev *) evw, reactor->base);
+    }
 
     close(edata.fd);
 }
@@ -1937,7 +1935,7 @@ static void ebt_srv_close(struct ebt_srv *srv, struct EventData *edata)
     int r;
     struct EventData ed;
     memcpy(&ed, edata, sizeof (struct EventData));
-    r = write(srv->pipe[1], &ed, sizeof(ed));
+    r = nWrite(srv->pipe[1], (char*)&ed, sizeof(ed));
 
     if (r < 0)
         err_msg("childThread write to pip fail, r=%d | errno=%d | errstr=%s", r, errno, strerror(errno));
@@ -1979,12 +1977,12 @@ static int ebt_srv_poll_start(struct ebt_srv *srv)
     int i;
     int size = srv->settings.num_reactors;
 
-    err_msg("MainThread: poll thread starting...! num_reactors=%d", size);
-
     for (i = 0; i < size; i++)
     {
         //TODO:
     }
+
+    err_msg("MainThread: poll thread starting...! num_reactors=%d", size);
     thread_pool_run(&srv->reactor_pool, ebt_srv_poll_routine);
 
     return 0;
@@ -1993,62 +1991,101 @@ static int ebt_srv_poll_start(struct ebt_srv *srv)
 static void ebt_srv_poll_event_process(short num, struct reactor *reactor)
 {
     int fd = num;
-    int n;
+    int n, pos, ret;
     struct factory *factory;
     struct EventData edata;
     struct ebt_srv *srv;
+    struct buf_Trunk *trunk;
     char buf[8192] = {0};
 
     srv = (struct ebt_srv *)reactor->ptr;
-    n   = read(fd, buf, sizeof(buf));
+    n   = nRead(fd, buf, sizeof(buf));
 
     if (n == 0)
     {
-
         edata.fd = fd;
         edata.len = sizeof(fd);
         edata.from_reactor_id = reactor->reactor_id;
-        // ebt_srv_close(srv, &edata);
-
-        struct ev_io *evr, *evw;
-        evr = ((struct ebt_epoll *) (reactor->base))->readev[edata.fd];
-        evw = ((struct ebt_epoll *) (reactor->base))->writev[edata.fd];
-
-        //回调close
-        if (srv->handles[E_CLOSE])
-            srv->handles[E_CLOSE](&edata);
-
-        if (evr) {
-            err_msg("num=%d | fd=%d", num, edata.fd);
-            ev_detach((struct ev *) evr, reactor->base);
-        }
-
-        if (evw)
-            ev_detach((struct ev *) evw, reactor->base);
-
-        err_msg("client disconnect: fd=%d | reactorId=%d", fd, reactor->reactor_id);
-        close(edata.fd);
+        ebt_srv_close(srv, &edata);
     }
     else if (n > 0)
     {
-        err_msg("fd=%d | total recv=%d | buf=%s", fd, n, buf);
+        //使用fd取模来散列分配
+        trunk = (struct buf_Trunk *) malloc(512); //for test
+        if (!trunk)
+        {
+            err_msg("allocate memory fail");
+            return;
+        }
 
-        write(fd, buf, n);
+        trunk->fd   = fd;
+        trunk->len  = 512 - sizeof(struct buf_Trunk);
+        trunk->data = (char *)trunk + sizeof(struct buf_Trunk);
+
+        //拷贝数据
+        memcpy(trunk->data, buf, trunk->len);
+
+        int pos = fd % srv->settings.num_factories;
+
+        if (cqueue_unshift(srv->factory_pool.threads[pos].cq, trunk, 512) < 0)
+        {
+            err_msg("unshift buf fail: pos %d", pos);
+            return;
+        }
+        else
+        {
+            //推入队列成功后, 阻塞在发送通知信息
+            uint64_t flag = 1;
+            ret = write(srv->factory_pool.threads[pos].notify_send_fd, &flag, sizeof(flag));
+
+            if (ret < 0)
+                err_msg("notify fail!");
+        }
     }
     else
     {
-        err_msg("handle fail!");
+        err_debug("abort");
     }
 }
 
-static int ebt_srv_factory_start(struct ebt_srv *srv)
+static void* ebt_srv_factory_routine(void *arg)
 {
-    return 0;
+    int n;
+    struct thread_param *param;
+    struct thread_entity *thread;
+    struct thread_pool *factory_pool;
+    struct factory *factory;
+    struct ebt_srv *srv;
+
+    param        = (struct thread_param *) arg;
+    n            = param->id;
+    factory_pool = param->data;
+    thread       = &factory_pool->threads[n];
+    factory      = (struct factory *) thread->data.ptr;
+    srv          = factory->ptr;
+
+    while (srv->status)
+    {
+        err_msg("child factory thread start: id =%d", factory->factory_id);
+    }
+
+    return NULL;
 }
 
-static void* ebt_srv_factory_routine(struct ebt_srv *srv)
+
+static int ebt_srv_factory_start(struct ebt_srv *srv)
 {
-    return NULL;
+    int i;
+    int size = srv->settings.num_factories;
+
+    for (i = 0; i < srv->settings.num_factories; i++)
+    {
+        //TODO:
+    }
+
+    thread_pool_run(&srv->factory_pool, ebt_srv_factory_routine);
+
+    return 0;
 }
 
 static void ebt_srv_factory_event_process(short num, struct ebt_srv *srv)
@@ -2194,15 +2231,18 @@ int ebt_srv_start(struct ebt_srv *srv)
     }
 
     r = ebt_srv_poll_start(srv);
+
     if (r < 0)
         err_exit("reactor threads start polling fail.");
 
     r = ebt_srv_factory_start(srv);
+
     if (r < 0)
         err_exit("factory threads start working fail.");
 
     mbase = ebt_new(E_READ | E_WRITE);
-    if (mbase == NULL)
+
+    if (! mbase)
         err_exit("can't create master reactor for master thread.");
 
     srv->mreactor.reactor.base = mbase;
@@ -2222,14 +2262,16 @@ int ebt_srv_start(struct ebt_srv *srv)
     edata.from_reactor_id = E_MASTER_REACTOR; 
     edata.type = E_STARTED;
 
-    if (srv->handles[E_START] != NULL)
+    if (srv->handles[E_START])
     {
         srv->handles[E_START](&edata);
     }
 
+    srv->status = 1;
+
     ebt_loop(mbase);
 
-    if (srv->handles[E_SHUTDOWN] != NULL)
+    if (srv->handles[E_SHUTDOWN])
     {
         edata.type = E_SHUTDOWNED;
         srv->handles[E_SHUTDOWN](&edata);
