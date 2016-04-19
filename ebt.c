@@ -489,7 +489,7 @@ struct thread_pool
 
 static void thread_setup(struct thread_entity *me)
 {
-    me->cq = cqueue_new(1024 * 256, 512, 0);
+    me->cq = cqueue_new(1024 * 256, 1024, 0);
     if (me->cq == NULL)
     {
         err_exit("can't allocate memory for cq queue!");
@@ -557,8 +557,6 @@ static void *thread_route(void *arg)
     struct thread_pool *pool = param->data;
     int ret = 0;
 
-    err_msg("thread [%d] is starting to work", thread_id);
-
     while(1)
     {
         pthread_mutex_lock(&pool->mutex);
@@ -566,7 +564,6 @@ static void *thread_route(void *arg)
         if (pool->shutdown)
         {
             pthread_mutex_unlock(&pool->mutex);
-            err_msg("thread[%d] will exit", (int)pool->threads[param->id].thread_id);
             pthread_exit(NULL);
         }
 
@@ -1674,6 +1671,7 @@ struct EventData
     int type;
     uint16_t len;
     uint16_t from_reactor_id;
+    char buf[8129];
 };
 
 struct sa
@@ -1843,10 +1841,10 @@ ebt_srv_reactors_init(struct ebt_srv *srv)
 
     for (i = 0; i < size; i++)
     {
-        srv->reactor_pool.threads[i].data.ptr = &reactors[i];
-
         reactors[i].reactor.reactor_id = i;
         reactors[i].reactor.ptr = srv;
+
+        srv->reactor_pool.threads[i].data.ptr = &reactors[i];
     }
 
     return 0;
@@ -1869,11 +1867,10 @@ ebt_srv_factories_init(struct ebt_srv *srv)
     //为线程分配任务调度器实例
     for (i = 0; i < size; i++)
     {
-        srv->factory_pool.threads[i].data.ptr = &factories[i];
-
         factories[i].factory_id = i;
         factories[i].ptr = srv;
-        factories[i].task = srv->handles[E_RECEIVE];
+
+        srv->factory_pool.threads[i].data.ptr = &factories[i];
     }
 
     return 0;
@@ -1955,10 +1952,9 @@ static void* ebt_srv_poll_routine(void *arg)
     n             = param->id;
     reactor_pool  = param->data;
     thread        = &reactor_pool->threads[n];
-    reactor       = (struct reactor *) thread->data.ptr;
+    reactor       = (struct reactor *) (thread->data.ptr);
     srv           = reactor->ptr;
     reactor->base = ebt_new(E_READ | E_WRITE);
-
 
     err_msg("child reactor thread starting: threadId=%d | reactorId=%d |reactorEPFD=%d", thread->thread_id, reactor->reactor_id,
     ((struct ebt_epoll *) (reactor->base))->epfd );
@@ -1982,7 +1978,6 @@ static int ebt_srv_poll_start(struct ebt_srv *srv)
         //TODO:
     }
 
-    err_msg("MainThread: poll thread starting...! num_reactors=%d", size);
     thread_pool_run(&srv->reactor_pool, ebt_srv_poll_routine);
 
     return 0;
@@ -1998,7 +1993,7 @@ static void ebt_srv_poll_event_process(short num, struct reactor *reactor)
     struct buf_Trunk *trunk;
     char buf[8192] = {0};
 
-    srv = (struct ebt_srv *)reactor->ptr;
+    srv = (struct ebt_srv *)(reactor->ptr);
     n   = nRead(fd, buf, sizeof(buf));
 
     if (n == 0)
@@ -2010,13 +2005,14 @@ static void ebt_srv_poll_event_process(short num, struct reactor *reactor)
     }
     else if (n > 0)
     {
-        //使用fd取模来散列分配
         trunk = (struct buf_Trunk *) malloc(512); //for test
         if (!trunk)
         {
             err_msg("allocate memory fail");
             return;
         }
+
+        memset(trunk, 0,sizeof(struct buf_Trunk));
 
         trunk->fd   = fd;
         trunk->len  = 512 - sizeof(struct buf_Trunk);
@@ -2025,11 +2021,12 @@ static void ebt_srv_poll_event_process(short num, struct reactor *reactor)
         //拷贝数据
         memcpy(trunk->data, buf, trunk->len);
 
+        //使用fd取模来散列分配
         int pos = fd % srv->settings.num_factories;
 
         if (cqueue_unshift(srv->factory_pool.threads[pos].cq, trunk, 512) < 0)
         {
-            err_msg("unshift buf fail: pos %d", pos);
+            err_msg("unshift buf fail: pos=%d", pos);
             return;
         }
         else
@@ -2041,6 +2038,9 @@ static void ebt_srv_poll_event_process(short num, struct reactor *reactor)
             if (ret < 0)
                 err_msg("notify fail!");
         }
+
+        //释放临时数据
+        free(trunk);
     }
     else
     {
@@ -2050,23 +2050,45 @@ static void ebt_srv_poll_event_process(short num, struct reactor *reactor)
 
 static void* ebt_srv_factory_routine(void *arg)
 {
-    int n;
+    int n, ret;
+    uint64_t flag;
     struct thread_param *param;
     struct thread_entity *thread;
     struct thread_pool *factory_pool;
     struct factory *factory;
+    struct EventData edata;
+    struct buf_Trunk *trunk;
     struct ebt_srv *srv;
 
     param        = (struct thread_param *) arg;
     n            = param->id;
     factory_pool = param->data;
     thread       = &factory_pool->threads[n];
-    factory      = (struct factory *) thread->data.ptr;
+    factory      = (struct factory *) (thread->data.ptr);
+    trunk        = (struct buf_Trunk *) malloc(512);
     srv          = factory->ptr;
 
     while (srv->status)
     {
-        err_msg("child factory thread start: id =%d", factory->factory_id);
+        if (cqueue_shift(thread->cq, trunk, 512) > 0)
+        {
+            edata.fd   = trunk->fd;
+            edata.type = E_RECEIVED;
+            edata.len  = trunk->len;
+            memset(edata.buf, 0, sizeof(edata.buf));
+            memcpy(edata.buf, trunk->data, trunk->len);
+
+            if (factory->task)
+                factory->task(&edata);
+            else
+                err_msg("no such handler!");
+        }
+        else
+        {
+            ret = read(thread->notify_recv_fd, &flag, sizeof(flag));
+            if (ret < 0)
+                err_msg("recv fail!");
+        }
     }
 
     return NULL;
@@ -2077,10 +2099,13 @@ static int ebt_srv_factory_start(struct ebt_srv *srv)
 {
     int i;
     int size = srv->settings.num_factories;
+    struct factory *factory;
 
     for (i = 0; i < srv->settings.num_factories; i++)
     {
         //TODO:
+        factory       = ebt_srv_get_factory(srv, i);
+        factory->task = srv->handles[E_RECEIVE];
     }
 
     thread_pool_run(&srv->factory_pool, ebt_srv_factory_routine);
@@ -2230,6 +2255,8 @@ int ebt_srv_start(struct ebt_srv *srv)
             return -1;
     }
 
+    srv->status = 1;
+
     r = ebt_srv_poll_start(srv);
 
     if (r < 0)
@@ -2267,8 +2294,6 @@ int ebt_srv_start(struct ebt_srv *srv)
         srv->handles[E_START](&edata);
     }
 
-    srv->status = 1;
-
     ebt_loop(mbase);
 
     if (srv->handles[E_SHUTDOWN])
@@ -2282,7 +2307,7 @@ int ebt_srv_start(struct ebt_srv *srv)
 
 int ebt_srv_on(struct ebt_srv *srv, enum r_type type, e_handle_t cb)
 {
-    if (type >= E_MAX_ETYPE)
+    if (!cb || type >= E_MAX_ETYPE)
         return -1;
     else
         srv->handles[type] = cb;
@@ -2478,6 +2503,10 @@ int on_connect(struct EventData *data)
 }
 int on_receive(struct EventData *data)
 {
+    err_msg("recv client Data: fd=%d | len=%d | buf=%s", data->fd, data->len, data->buf);
+
+    write(data->fd,data->buf, data->len);
+
     return 0;
 }
 int on_close(struct EventData *data)
