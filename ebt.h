@@ -6,6 +6,7 @@
 
 struct ev;
 struct eb_t;
+typedef void e_cb_t(short, void *);
 
 enum e_kind
 {
@@ -22,8 +23,6 @@ enum e_opt
 	E_ONCE = 0x01,	/* 一次性事件, 当事件dipsatch到队列后,  激活后立该从eb_t移除, 并标记为ONCE */
 	E_FREE = 0x02	/* 事件已经从eb_t实例被移除, 将其标记为E_FREE, 释放其存储空间 */
 };
-
-typedef void e_cb_t(short, void *);
 
 EBT_API struct ev * ev_read(int fd, e_cb_t *cb, void *arg);
 EBT_API struct ev * ev_write(int fd, e_cb_t *cb, void *arg);
