@@ -53,3 +53,50 @@ void tcb(short num, void *arg)
 	printf("buf:%s\n", (char*)arg);
 }
 ```
+
+###异步TCP服务
+```c
+#include <stdio.h>
+#include <ebt.h>
+
+int on_connect(struct EventData *data)
+{
+    printf ("new client connected: fd=%d | reactor_id=%d | data=%s", data->fd, data->from_reactor_id, data->buf);
+    return 0;
+}
+int on_receive(struct EventData *data)
+{
+    printf ("recv client Data: fd=%d | len=%d | buf=%s", data->fd, data->len, data->buf);
+
+    write(data->fd,data->buf, data->len);
+
+    return 0;
+}
+int on_close(struct EventData *data)
+{
+    printf ("client [fd=%d] [reactorId=%d] disconnected", data->fd, data->from_reactor_id);
+    return 0;
+}
+
+int on_shutdown(struct EventData *data)
+{
+   return 0; 
+}
+
+int main(void)
+{
+    struct ebt_srv srv; 
+    ebt_srv_create(&srv);
+
+    ebt_srv_on(&srv, E_CONNECT, on_connect);
+    ebt_srv_on(&srv, E_RECEIVE, on_receive);
+    ebt_srv_on(&srv, E_CLOSE, on_close);
+    ebt_srv_on(&srv, E_SHUTDOWN, on_shutdown);
+
+
+    ebt_srv_listen(&srv, 8080);
+    ebt_srv_start(&srv);
+
+	return 0;
+}
+```
