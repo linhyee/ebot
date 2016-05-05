@@ -1657,6 +1657,8 @@ enum s_type
 #define E_NUM_REACTORS    4
 #define E_NUM_FACTORIES   2
 #define E_MASTER_REACTOR  E_NUM_REACTORS
+#define E_TCP_PACKAGE_LEN 8129
+#define E_BUFFER_SIZE     512
 
 struct buf_Trunk
 {
@@ -1671,7 +1673,7 @@ struct EventData
     int type;
     uint16_t len;
     uint16_t from_reactor_id;
-    char buf[8129];
+    char buf[E_TCP_PACKAGE_LEN];
 };
 
 struct sa
@@ -1986,15 +1988,20 @@ static int ebt_srv_poll_start(struct ebt_srv *srv)
 static void ebt_srv_poll_event_process(short num, struct reactor *reactor)
 {
     int fd = num;
-    int n, pos, ret;
+    int n, pos, ret, err = 0;
     struct factory *factory;
     struct EventData edata;
     struct ebt_srv *srv;
     struct buf_Trunk *trunk;
-    char buf[8192] = {0};
+    char buf[E_TCP_PACKAGE_LEN] = {0};
 
     srv = (struct ebt_srv *)(reactor->ptr);
-    n   = nRead(fd, buf, sizeof(buf));
+
+    READ:
+    n = nRead(fd, buf, sizeof(buf));
+
+    if (errno == EAGAIN)
+        err = EAGAIN;
 
     if (n == 0)
     {
@@ -2005,7 +2012,7 @@ static void ebt_srv_poll_event_process(short num, struct reactor *reactor)
     }
     else if (n > 0)
     {
-        trunk = (struct buf_Trunk *) malloc(512); //for test
+        trunk = (struct buf_Trunk *) malloc(E_BUFFER_SIZE); //for test
         if (!trunk)
         {
             err_msg("allocate memory fail");
@@ -2015,16 +2022,16 @@ static void ebt_srv_poll_event_process(short num, struct reactor *reactor)
         memset(trunk, 0,sizeof(struct buf_Trunk));
 
         trunk->fd   = fd;
-        trunk->len  = 512 - sizeof(struct buf_Trunk);
+        trunk->len  = n;
         trunk->data = (char *)trunk + sizeof(struct buf_Trunk);
 
         //拷贝数据
-        memcpy(trunk->data, buf, trunk->len);
+        memcpy(trunk->data, buf, E_BUFFER_SIZE - sizeof(struct buf_Trunk));
 
         //使用fd取模来散列分配
         int pos = fd % srv->settings.num_factories;
 
-        if (cqueue_unshift(srv->factory_pool.threads[pos].cq, trunk, 512) < 0)
+        if (cqueue_unshift(srv->factory_pool.threads[pos].cq, trunk, E_BUFFER_SIZE) < 0)
         {
             err_msg("unshift buf fail: pos=%d", pos);
             return;
@@ -2041,6 +2048,10 @@ static void ebt_srv_poll_event_process(short num, struct reactor *reactor)
 
         //释放临时数据
         free(trunk);
+
+        //EPOLL的ET模式, 缓冲区还有数据未读完
+        if (err == EAGAIN)
+            goto READ;
     }
     else
     {
@@ -2065,12 +2076,12 @@ static void* ebt_srv_factory_routine(void *arg)
     factory_pool = param->data;
     thread       = &factory_pool->threads[n];
     factory      = (struct factory *) (thread->data.ptr);
-    trunk        = (struct buf_Trunk *) malloc(512);
+    trunk        = (struct buf_Trunk *) malloc(E_BUFFER_SIZE);
     srv          = factory->ptr;
 
     while (srv->status)
     {
-        if (cqueue_shift(thread->cq, trunk, 512) > 0)
+        if (cqueue_shift(thread->cq, trunk, E_BUFFER_SIZE) > 0)
         {
             edata.fd   = trunk->fd;
             edata.type = E_RECEIVED;
