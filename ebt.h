@@ -42,4 +42,49 @@ EBT_API int ebt_loop_once(struct eb_t *ebt);
 EBT_API int ebt_loop(struct eb_t *ebt);
 EBT_API void ebt_free(struct eb_t *ebt);
 
+enum r_type
+{
+    E_START    = 0,
+    E_CONNECT  = 1,
+    E_RECEIVE  = 2,
+    E_TIMEOUT  = 3,
+    E_CLOSE    = 4,
+    E_SHUTDOWN = 5,
+    E_ERROR    = 6
+};
+
+enum s_type
+{
+    E_CLOSED     = 0,
+    E_CLOSING    = 1,
+    E_CONNECTING = 2,
+    E_CONNECTED  = 3,
+    E_RECEIVING  = 4,
+    E_RECEIVED   = 5,
+    E_STARTED    = 6,
+    E_STARTING   = 7,
+    E_SHUTDOWNED = 8
+};
+
+#define E_TCP_PACKAGE_LEN 8129
+
+struct ebt_srv;
+
+struct EventData
+{
+    int fd;
+    int type;
+    uint16_t len;
+    uint16_t from_reactor_id;
+    char buf[E_TCP_PACKAGE_LEN];
+};
+
+typedef int (*e_handle_t)(struct EventData *);
+
+EBT_API int ebt_srv_create(struct ebt_srv *srv);
+EBT_API int ebt_srv_start(struct ebt_srv *srv);
+EBT_API int ebt_srv_listen(struct ebt_srv *srv, short port);
+EBT_API int ebt_srv_on(struct ebt_srv *srv, enum r_type type, e_handle_t cb);
+EBT_API void ebt_srv_free(struct ebt_srv *srv);
+
 #endif
