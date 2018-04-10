@@ -1669,11 +1669,12 @@ struct buf_Trunk
 
 struct EventData
 {
-    int fd;
-    int type;
-    uint16_t len;
-    uint16_t from_reactor_id;
-    char buf[E_TCP_PACKAGE_LEN];
+    int fd;                         //文件描述符
+    int type;                       //事件类型(srv)
+    uint16_t len;                   //实际从fd读取到的长度
+    uint16_t from_reactor_id;       //所属反应堆
+    char buf[E_TCP_PACKAGE_LEN];    //缓存从fd读取的数据
+    char *udata;                    //带外
 };
 
 struct sa
