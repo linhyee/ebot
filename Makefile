@@ -1,7 +1,7 @@
 CFLAGS = -Wall -g -O0
 
-all:
-	gcc ${CFLAGS} -I. -c ebt.c -lpthread -DDEBUG
+test:
+	gcc ${CFLAGS} -I. -c ebot.c test.c -lpthread
 
 clean:
 	rm -f *.o *.fifo
