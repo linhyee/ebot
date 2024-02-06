@@ -263,7 +263,7 @@ int ringq_pop(ringq *rq, void *item, int item_size) {
   int msize = unit->length + lsz;
 
   if (rq->tail <= rq->head) {
-    sz = rq->size - (rq->head - rq->tail);
+    sz = rq->size - (rq->head - rq->tail); //tail要追上head，所以不用减1
     if (sz < msize) {
       err_exit("ringq out of size, cap:%d, ava:%d, head:%d, tail:%d, length:%d, msize:%d, item_size:%d, num:%d",
         rq->size -1, sz, rq->head, rq->tail, unit->length, msize, item_size, rq->num);
@@ -540,6 +540,7 @@ static int wunit_init(wunit *u, int qsz, int id) {
 typedef struct {
   wunit *units;
   int num;
+  pthread_mutex_t wlock;
   int status;
 } wpool;
 
@@ -556,6 +557,11 @@ wpool* wpool_new(int num, int rq_sz) {
 
   wp->num = num;
   wp->units = mem;
+  int ret = pthread_mutex_init(&wp->wlock, NULL);
+  if (ret < 0) {
+    err_debug("wpool init wlock error: %s", strerror(ret));
+    return NULL;
+  }
   int i;
   for (i = 0; i < num; i++) {
     if (wunit_init(&wp->units[i], rq_sz, i+1) < 0) {
@@ -634,6 +640,7 @@ void wpool_destory(wpool *wp) {
     ringq_destroy(wp->units[i].rq);
     close (wp->units[i].efd);
   }
+  pthread_mutex_destroy(&wp->wlock);
   if (wp) {
     free(wp);
   }
@@ -1428,11 +1435,17 @@ static void eb_srv_factory_exec(void* arg) {
 
     if (stream.buf_size == 0) {
       if (srv->callbacks[EB_CLOSE] != NULL) {
+        //临界区保护
+        pthread_mutex_lock(&srv->factory->wlock);
         srv->callbacks[EB_CLOSE](&stream);
+        pthread_mutex_unlock(&srv->factory->wlock);
       }
     } else {
       if (srv->callbacks[EB_RECV] != NULL) {
+        //临界区保护
+        pthread_mutex_lock(&srv->factory->wlock);
         srv->callbacks[EB_RECV](&stream);
+        pthread_mutex_unlock(&srv->factory->wlock);
       }
     }
   } else {
