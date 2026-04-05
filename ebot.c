@@ -103,7 +103,12 @@ static void vec_expand(char **data, int *length,
 
   if (*length + 1 > *capacity) {
     *capacity = (*capacity == 0) ? 1 : (*capacity << 1);
-    *data = realloc(*data, (size_t)(*capacity * memsz));
+    void *new_data = realloc(*data, (size_t)(*capacity * memsz));
+    if (new_data == NULL) {
+      err_debug("vec_expand: realloc failed.");
+      return;
+    }
+    *data = new_data;
   }
 }
 
@@ -549,7 +554,7 @@ wpool* wpool_new(int num, int rq_sz) {
   void *mem = malloc(msz);
   if (!mem) {
     err_debug("wpool allocate memory error: %s", strerror(errno));
-    return NULL;
+    goto err;
   }
   memset(mem, 0, msz);
   wpool *wp = mem;
@@ -560,15 +565,20 @@ wpool* wpool_new(int num, int rq_sz) {
   int ret = pthread_mutex_init(&wp->wlock, NULL);
   if (ret < 0) {
     err_debug("wpool init wlock error: %s", strerror(ret));
-    return NULL;
+    goto err;
   }
   int i;
   for (i = 0; i < num; i++) {
     if (wunit_init(&wp->units[i], rq_sz, i+1) < 0) {
-      return NULL;
+      goto err;
     }
   }
   return wp;
+err:
+  if (mem) {
+    free(mem);
+  }
+  return NULL;
 }
 
 static void* wpool_exec(void *arg) {
@@ -1162,48 +1172,46 @@ reactor_pool* reactor_pool_new(int rsz) {
   return rp;
 }
 
+/**
+ * 读取n字节数据到buf中，非阻塞调用
+ * @param fd 文件描述符
+ * @param buf 数据缓冲区
+ * @param len 数据长度
+ * @return 读取到的字节数
+ */
 static int readn(int fd, char *buf, int len) {
-  int n = 0, nread;
-  while (1) {
-    nread = read(fd, buf + n, len -n);
-    if (nread < 0) {
-      if (errno == EINTR){
-        continue;
-      }
-      break;
-    } else if (nread == 0) {
-      return 0;
-    } else {
-      n += nread;
-      if (n == len) {
-        break;
-      }
-      continue;
+  ssize_t n = recv(fd, buf, len, MSG_DONTWAIT);
+  if (n < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return 0; // 无数据可读
     }
+    return -1; // 错误
+  } else if (n == 0) {
+    return -2; // 连接关闭
   }
   return n;
 }
 
 static int writen(int fd, char *buf, int len) {
-  int n = 0;
+  ssize_t n = 0;
   int total = 0;
-  while (total != len) {
-    n = write(fd, buf, len - total);
-    if (n == -1) {
-      return total;
-    }
-    if (n == -1) {
+  while (total < len) {
+    n = send(fd, buf + total, len - total, MSG_DONTWAIT | MSG_NOSIGNAL);
+    if (n > 0) {
+      total += n;
+    } else if (n == 0) { // 返回0, 连接关闭
+      break;
+    } else {
       if (errno == EINTR) {
         continue;
-      } else if (errno == EAGAIN) {
-        sleep(1);
-        continue;
+      } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        break;
+      } else if (errno == EPIPE) {
+        return -2;
       } else {
         return -1;
       }
     }
-    total += n;
-    buf += n;
   }
   return total;
 }
@@ -1219,18 +1227,26 @@ static void reactor_pool_client_read_callback(int fd, void *arg) {
   int id = fd % _get_eb_srv_factory(r->srv)->num;
 
   int n =readn(fd, data.buf, sizeof(data.buf));
-  if (n == 0) {
+  if (n == -2) { // 连接关闭
     if (r->base->read_waits[fd] != NULL) {
-      ebot_del_event(r->base, r->base->read_waits[fd]);
+      struct event *e = r->base->read_waits[fd];
+      ebot_del_event(r->base, e);
+      if (e != NULL) {
+        mpool_put_with_lock(_get_eb_srv_event_pool(r->srv), e);
+      }
     }
     if (r->base->write_waits[fd] != NULL) {
-      ebot_del_event(r->base, r->base->write_waits[fd]);
+      struct event *e = r->base->write_waits[fd];
+      ebot_del_event(r->base, e);
+      if (e != NULL) {
+        mpool_put_with_lock(_get_eb_srv_event_pool(r->srv), e);
+      }
     }
     err_debug("remote client fd=%d close", fd);
   } else if (n > 0) {
     data.fd = fd;
     data.len = n;
-  } else {
+  } else if ( n == -1) { // 错误
     //TODO
     err_debug("read fd buf less then 0!!!!!!!!!");
     return;
@@ -1435,17 +1451,11 @@ static void eb_srv_factory_exec(void* arg) {
 
     if (stream.buf_size == 0) {
       if (srv->callbacks[EB_CLOSE] != NULL) {
-        //临界区保护
-        pthread_mutex_lock(&srv->factory->wlock);
         srv->callbacks[EB_CLOSE](&stream);
-        pthread_mutex_unlock(&srv->factory->wlock);
       }
     } else {
       if (srv->callbacks[EB_RECV] != NULL) {
-        //临界区保护
-        pthread_mutex_lock(&srv->factory->wlock);
         srv->callbacks[EB_RECV](&stream);
-        pthread_mutex_unlock(&srv->factory->wlock);
       }
     }
   } else {
