@@ -890,35 +890,44 @@ static int _resize_epoll_events(struct ebot_base *eb) {
 struct ebot_base* ebot_new(e_kide kides) {
   if (((E_READ | E_WRITE) & kides) != kides) {
     err_debug("not supported event kides: %x", kides);
-    return NULL;
+    goto err;
   }
   struct ebot_base *base = malloc(sizeof(struct ebot_base));
   if (base == NULL) {
     err_debug("ebot base new error: %s", strerror(errno));
-    return NULL;
+    goto err;
   }
   memset(base, 0, sizeof(struct ebot_base));
   base->kides = kides;
   
   size_t sz = EP_SIZE * sizeof(struct epoll_event);
   base->epevents = malloc(sz);
-  assert(base->epevents != NULL);
+  if (base->epevents == NULL) {
+    err_debug("malloc epevents error: %s", strerror(errno));
+    goto err;
+  }
   memset(base->epevents, 0, sz);
 
 
   sz = EP_SIZE * sizeof(struct event*);
   base->read_waits = malloc(sz);
-  assert(base->read_waits != NULL);
+  if (base->read_waits == NULL) {
+    err_debug("malloc read_waits error: %s", strerror(errno));
+    goto err;
+  }
   memset(base->read_waits, 0, sz);
 
   base->write_waits = malloc(sz);
-  assert(base->write_waits != NULL);
+  if (base->write_waits == NULL) {
+    err_debug("malloc write_waits error: %s", strerror(errno));
+    goto err;
+  }
   memset(base->write_waits, 0, sz);
 
   int epfd = epoll_create(EP_SIZE);
   if (epfd< 0) {
     err_debug("epoll fd create error: %s", strerror(errno));
-    return NULL;
+    goto err;
   }
   FD_CLOSEONEXEC(epfd);
   base->epfd = epfd;
@@ -929,6 +938,12 @@ struct ebot_base* ebot_new(e_kide kides) {
   TAILQ_INIT(&base->event_readies);
 
   return base;
+err:
+  if (base->epevents) free(base->epevents);
+  if (base->read_waits) free(base->read_waits);
+  if (base->write_waits) free(base->write_waits);
+  if (base) free(base);
+  return NULL;
 }
 
 int ebot_add_event(struct ebot_base *eb, struct event *e) {
@@ -1160,7 +1175,9 @@ reactor_pool* reactor_pool_new(int rsz) {
   for (i=0; i < rsz; i++) {
     rp->reactors[i].id = i+1;
     base = ebot_new(E_READ | E_WRITE);
-    assert(base != NULL);
+    if (base == NULL) {
+      err_exit("ebot_new failed for reactor %d", i);
+    }
     rp->reactors[i].base = base;
 
     if (pipe(rp->reactors[i].pipe) < 0) {
@@ -1290,6 +1307,7 @@ static void reactor_pool_pipe_callback(int pfd, void *arg) {
   event_read(e, fd, reactor_pool_client_read_callback, r);
   if (ebot_add_event(r->base, e) < 0) {
     err_debug("ebot base add client fd[%d] read event fail", fd);
+    mpool_put_with_lock(_get_eb_srv_event_pool(r->srv), e);
   }
 
   e = mpool_get_with_lock(_get_eb_srv_event_pool(r->srv));
@@ -1299,6 +1317,7 @@ static void reactor_pool_pipe_callback(int pfd, void *arg) {
   event_write(e, fd, reacto_pool_client_write_callback, r);
   if (ebot_add_event(r->base, e) < 0) {
     err_debug("ebot base add client fd[%d] write event fail", fd);
+    mpool_put_with_lock(_get_eb_srv_event_pool(r->srv), e);
   }
 }
 
@@ -1500,11 +1519,15 @@ ebot_srv* eb_srv_new(eb_settings *s) {
     psz = 4;
   }
   srv->event_pool = mpool_new(psz, sizeof(struct event));
-  assert(srv->event_pool != NULL);
+  if (srv->event_pool == NULL) {
+    err_exit("new event_pool error: %s", strerror(errno));
+  }
 
   //主反应堆
   srv->master_base = ebot_new(E_READ);
-  assert(srv->master_base != NULL);
+  if (srv->master_base == NULL) {
+    err_exit("new master base error: %s", strerror(errno));
+  }
 
   //从反应堆线程池
   int rsz = s->reactor_num;
@@ -1512,7 +1535,9 @@ ebot_srv* eb_srv_new(eb_settings *s) {
     rsz = 4;
   }
   srv->slave_reactor = reactor_pool_new(rsz);
-  assert(srv->slave_reactor != NULL);
+  if (srv->slave_reactor == NULL) {
+    err_exit("new slave reactors error: %s", strerror(errno));
+  }
 
   //工作线程池
   int fsz = s->factory_num;
@@ -1520,7 +1545,9 @@ ebot_srv* eb_srv_new(eb_settings *s) {
     fsz = 4;
   }
   srv->factory = wpool_new(fsz, 1024 * 10);
-  assert(srv->factory != NULL);
+  if (srv->factory == NULL) {
+    err_exit("new factory error: %s", strerror(errno));
+  }
 
   int i;
   for (i=0; i< fsz; i++) {
@@ -1595,7 +1622,9 @@ int eb_srv_start(ebot_srv *srv) {
   //启动master reactor
   struct event *event;
   event = mpool_get_with_lock(srv->event_pool);
-  assert(event != NULL);
+  if (event == NULL) {
+    err_exit("eb_srv_start: new event error: %s", strerror(errno));
+  }
 
   event_read(event, srv->sfd, ebot_srv_accept, srv);
   ret = ebot_add_event(srv->master_base, event);
