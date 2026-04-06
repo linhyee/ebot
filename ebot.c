@@ -527,6 +527,8 @@ typedef struct {
   void (*handler)(void*);
 } wunit;
 
+void wpool_destory(wpool *wp);
+
 static int wunit_init(wunit *u, int qsz, int id) {
   u->id = id;
   u->efd = eventfd(0, EFD_CLOEXEC);
@@ -575,8 +577,8 @@ wpool* wpool_new(int num, int rq_sz) {
   }
   return wp;
 err:
-  if (mem) {
-    free(mem);
+  if (wp) {
+    wpool_destory(wp);
   }
   return NULL;
 }
@@ -648,7 +650,9 @@ void wpool_destory(wpool *wp) {
   int i;
   for (i = 0; i < wp->num; i++) {
     ringq_destroy(wp->units[i].rq);
-    close (wp->units[i].efd);
+    if (wp->units[i].efd > 0) {
+      close (wp->units[i].efd);
+    }
   }
   pthread_mutex_destroy(&wp->wlock);
   if (wp) {
